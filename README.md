@@ -1,0 +1,1 @@
+Repository for working with semiconductor design files and taking Verilog files and creating graph data to train GNNs to accomplish different tasks in the area of hardware security. 

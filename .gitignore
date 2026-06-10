@@ -1,3 +1,6 @@
 data/
 .venv/
 uv.lock
+__temp_netlist.v
+output.txt
+sctrach.txt

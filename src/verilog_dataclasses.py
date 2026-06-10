@@ -1,18 +1,52 @@
 from dataclasses import dataclass, asdict, astuple, fields, field
 from pyosys.libyosys import PortDir
-from typing import Dict, Any
+from typing import TypedDict, Dict, Any
+
+
+@dataclass
+class FileInfo:
+    filepath: str=''
+    filename: str=''
+    module: str=''
+    lines: tuple[float, float]=(0.0, 0.0)
+
+    def __repr__(self):
+        return f'{asdict(self)}'
+
+@dataclass
+class Port:
+    idx: int
+    name: str
+    type: str
+    size: int
+    direction: PortDir
+
+    def __hash__(self):
+        return hash(astuple(self))
+
+    def __repr__(self):
+        return f'Port({asdict(self)})'
+
 
 @dataclass
 class Cell:
     idx: int
     name: str
     type: str
-    filename: str
-    module: str
-    cell_lineno: tuple[float, float]
+    ports: list[Port]
     fan_in: int
     fan_out: int
-    label: int
+    label: int = 0
+    max_wire_width: int=0
+    trigger_like_cell: bool = False
+    drives_module_output: bool = False
+    is_combinational_gate: bool = False
+    is_steering_element: bool = False
+    file_info: FileInfo=field(default_factory=FileInfo)
+
+    def __post_init__(self):
+        self.is_combinational_gate = self.type in ["$_AND_", "$_OR_", "$_XOR_", "$_XNOR_", "$_NAND_", "$_NOR_", "$_NOT_"]
+        self.is_steering_element = "MUX" in self.type
 
     def __eq__(self, other):
         if not isinstance(other, Cell):
@@ -20,73 +54,57 @@ class Cell:
         return asdict(self) == asdict(other)
 
     def __hash__(self):
-        return hash(astuple(self))
+        return hash((self.idx, self.name, self.type))
 
-    def to_dict(self):
-        return asdict(self)
-
-
-@dataclass
-class Port:
-    name: str
-    type: str
-    direction: PortDir
-
-    '''def __init__(self, name: str, direction: PortDir, port_gate_role_map: dict):
-        
-        self.name = name
-        self.direction = direction
-
-        if port_gate_role_map and self.name in port_gate_role_map:
-            self.type = port_gate_role_map[self.name]
-        else:
-            self.type= f"Generic Native Port [{"Input" if self.direction== PortDir.PD_INPUT else "Output"}]"'''
-
-    def __hash__(self):
-        return hash(astuple(self))
-
-    def to_dict(self):
-        return {'name': self.name, 'type': self.type}
+    def __repr__(self):
+        return f'Cell({asdict(self)})'
 
 
 @dataclass
 class Wire:
     name: str
-    width: int
-    wire_lineno: tuple[float, float]
+    width: int=1
+    output_wire:bool=False
+    reads_control_or_slices:bool=False
+    file_info: FileInfo=field(default_factory=FileInfo)
 
     def __hash__(self):
         return hash(astuple(self))
 
-
+    def __repr__(self):
+        return f'Wire({asdict(self)})'
 
 @dataclass
-class Bit(Wire):
+class Bit:
     name: str
-    width: int
-    wire_lineno: tuple[float, float]
     offset: int
-    port: Port
-    cell: Cell
+    cell_idx: int
+    port_idx: int
+    wire: str
 
-    @classmethod
-    def from_wire(cls, wire:Wire, offset: int, port:Port, cell:Cell):
-        return cls(**wire.__dict__, offset=offset, port=port, cell=cell)
+    @staticmethod
+    def from_wire(wire:Wire, offset: int, cell_idx:int, port_idx:int):
+        return Bit(name=wire.name + '[' + str(offset) + ']', offset=offset, cell_idx=cell_idx, port_idx=port_idx, wire=wire.name)
 
     def __repr__(self):
-        return f'Bit(name={self.name},width={self.width},wire_lineno={self.wire_lineno},offset={self.offset},port={type(self.port)},cell={type(self.cell)})'
+        return f'Bit({asdict(self)})'
 
 
 @dataclass
 class Signal:
-    src: Bit
-    dst: Bit
+    src_port: Port
+    dst_port: Port
     wire: Wire
+    driver_offset: tuple[int, int]
+    sink_offset: tuple[int, int]
 
     def __eq__(self, other):
-        if not isinstance(other, Bit):
+        if not isinstance(other, Signal):
             return NotImplemented
         return asdict(self) == asdict(other)
 
     def __hash__(self):
         return hash(astuple(self))
+
+    def __repr__(self):
+        return f'Signal({asdict(self)})'

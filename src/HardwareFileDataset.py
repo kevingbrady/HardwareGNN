@@ -3,12 +3,11 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from pyosys import libyosys as yosys
 from pathlib import Path
-from src.utils import compact_dir, get_bit_key
+from src.utils import compact_dir, output_manager
 from src.cell_mappings import GATE_ROLE_MAP, CUSTOM_MODULE_ROLE_MAP, CONST_STATE_MAP
 from src.verilog_dataclasses import Cell, Port, Wire, Bit, Signal, FileInfo
 import pprint
 import subprocess
-import tkinter
 
 liberty_file_path = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_100C_1v80.lib'
 
@@ -20,13 +19,12 @@ class HardwareFileDataset(Dataset):
     def __init__(self, data_dir):
         super(HardwareFileDataset, self).__init__()
 
-        self._run_silent = False
-        self.silent = 'tee -q ' if self._run_silent else ''
+        self.silent = True
         self.top_module = None
         self.num_cells = 0
 
         self.netlist: list[Cell] = []  # Nodes
-        self.signal_map: dict[tuple[int, int], Signal] = {}  # Edges
+        self.signal_map: dict[tuple[Bit, Bit], Signal] = {}  # Edges
 
         self.bit_wire_map = {
             Wire(name='GND'): {PortDir.PD_INPUT: [], PortDir.PD_OUTPUT: []},
@@ -37,72 +35,87 @@ class HardwareFileDataset(Dataset):
             Wire(name='INTERNAL_PASS_MARKER'): {PortDir.PD_INPUT: [], PortDir.PD_OUTPUT: []}
         }
 
-        self.design, self.top_module = self.extract_netlist(data_dir)
+        self.design = self.extract_behavioral_design(data_dir)
 
-        self.build_bit_wire_map()  # Get connections of each bit/port/cell
-        self.get_circuit_power_timing_area_info()  # Flatten netlist to get power/timing/area info for each cell
+        self.high_level_design_pass()  # Get connections of each bit/port/cell
         self.build_signal_map()        # Condense each bit-bit connection into summarized port-port connection with cell info
+        self.low_level_design_pass()  # Flatten netlist to get power/timing/area info for each cell/ bit-bit connection
 
-    def extract_netlist(self, data_dir):
+    def extract_behavioral_design(self, data_dir):
 
-        yosys.yosys_setup()
-        design = yosys.Design()
+        with output_manager(silent=self.silent):
+            yosys.yosys_setup()
+            design = yosys.Design()
 
-        for file in Path(data_dir).rglob("*"):
+            for file in Path(data_dir).rglob("*"):
 
-            if file.suffix in ('.v', '.vhd'):
-                filepath = str(file.absolute())
-                if not filepath.__contains__('test'):
-                    design.run_pass(f'{self.silent} read_verilog {filepath}')
+                if file.suffix in ('.v', '.vhd'):
+                    filepath = str(file.absolute())
+                    if not filepath.__contains__('test'):
+                        design.run_pass(f'read_verilog {filepath}')
 
-        design.run_pass(f'{self.silent} hierarchy -auto-top')
-        top_module = design.top_module()
+            design.run_pass(f'hierarchy -auto-top')
+            design.run_pass(f'proc')
 
-        design.run_pass(f'{self.silent} proc')
-        #design.run_pass(f'{self.silent} opt')
+            yosys.run_pass(f'design -push-copy', design)
 
-        # High-Level RTL Synthesis coarse pass
-        design.run_pass(f'{self.silent} synth -top {top_module.name.str()} -run fine')
+        return design
 
-        return design, top_module
+    def low_level_design_pass(self):
 
-    def get_circuit_power_timing_area_info(self):
+        # Flattens netlist to be able to be run with sta to get low level power, timing, and area info
+        with output_manager(silent=self.silent):
+            yosys.run_pass(f'design -pop', self.design)
+            self.top_module = self.design.top_module()
+            self.design.run_pass('keep_hierarchy')
+            # Fine RTL Synthesis coarse pass
+            #self.design.run_pass(f'synth -top {self.top_module.name.str()} -run fine')
+            #self.design.run_pass(f'splitnets -ports')
 
-        #self.design.run_pass('flatten')
-        #self.design.run_pass(f'synth -flatten -nofsm -noabc -top {self.top_module.name.str().replace('\\', '')}')
-        # Map coarse-grain RTL to internal gate primitives
-        #self.design.run_pass(f'{self.silent} techmap -map +/adff2dff.v')
-        self.design.run_pass('splitnets -ports')
-        #self.design.run_pass('dfflegalize -cell $_DFF_P_ 0')
+            self.design.run_pass('fsm')
+            self.design.run_pass('memory')
+            self.design.run_pass('opt')
+            self.design.run_pass('techmap')
+            self.design.run_pass('simplemap')
+            self.design.run_pass('opt')
 
-        # Map sequential cells (Flip-Flops) using the Liberty file
-        self.design.run_pass(f'{self.silent} dfflibmap -liberty {liberty_file_path}')
+            # Map sequential cells (Flip-Flops) using the Liberty file
+            self.design.run_pass(f'dfflibmap -liberty {liberty_file_path}')
+            self.design.run_pass('opt_clean')
 
-        #  Map combinational logic using ABC and the Liberty file
-        self.design.run_pass(f'{self.silent} abc -liberty {liberty_file_path}')
-        self.design.run_pass(f'{self.silent} clean -purge')
+            #  Map combinational logic using ABC and the Liberty file
+            self.design.run_pass(f'abc -liberty {liberty_file_path}')
+            self.design.run_pass(f'clean')
 
-        self.design.run_pass(f'write_verilog -siminit -noattr -noexpr -nodec {Path.cwd()}/__temp_netlist.v')
+            self.design.run_pass(f'write_verilog -norename {Path.cwd()}/__temp_netlist.v')
 
-        tcl_args = f"""
-            set ::top_module "{self.top_module.name.str().replace('\\', '')}"
-            set ::liberty_file "{liberty_file_path}"
-            set ::working_dir "{Path.cwd()}"
-
-            source "{Path.cwd()}/metadata/get_power_timing_area_cell_data.tcl"
-            exit
-        """
-        result = subprocess.run(['sta', '-no_init'], input=tcl_args, capture_output=True, text=True, check=True)
+            tcl_args = f"""
+                set ::top_module "{self.top_module.name.str().replace('\\', '')}"
+                set ::liberty_file "{liberty_file_path}"
+                set ::working_dir "{Path.cwd()}"
+    
+                source "{Path.cwd()}/metadata/get_power_timing_area_cell_data.tcl"
+                #source "{Path.cwd()}/metadata/bit_signal_map.tcl"
+                exit
+            """
+            result = subprocess.run(['sta', '-no_init'], input=tcl_args, capture_output=True, text=True, check=True)
 
         #print('Output: ', result.stdout.strip())
-        with open('output.txt', 'w+') as f:
+        with open('output.txt', 'w', encoding='utf-8') as f:
             f.write(result.stdout.strip())
 
 
-    def build_bit_wire_map(self):
+    def high_level_design_pass(self):
+
+        # Builds bit_wire_map and netlist to be able to get the full nodes and edges of the graph as cells (nodes)
+        # and signals representing connections between cells (edges)
 
         idx = 0
-        cell_types = set()
+        self.top_module = self.design.top_module()
+
+        with output_manager(silent=self.silent):
+            # High-Level RTL Synthesis coarse pass
+            self.design.run_pass(f'synth -top {self.top_module.name.str()} -run coarse')
 
         for module_name, module in self.design.modules_.items():
 
@@ -136,7 +149,6 @@ class HardwareFileDataset(Dataset):
                 )
 
                 port_gate_role_map = GATE_ROLE_MAP.get(cell.type, CUSTOM_MODULE_ROLE_MAP)
-                cell_types.add(cell.type)
                 #print(idx, cell.file_info.module, cell.name, cell.type)
 
                 for port_id, sig_spec in yosys_cell.connections_.items():
@@ -188,22 +200,19 @@ class HardwareFileDataset(Dataset):
 
             for sink_bit, driver_bit in zip(entries[PortDir.PD_INPUT], entries[PortDir.PD_OUTPUT]):
 
-                if (driver_bit.cell_idx, sink_bit.cell_idx) not in self.signal_map:
+                if (driver_bit, sink_bit) not in self.signal_map:
 
                     sink_port = self.get_cell(sink_bit.cell_idx).ports[sink_bit.port_idx]
                     driver_port = self.get_cell(driver_bit.cell_idx).ports[driver_bit.port_idx]
 
-                    self.signal_map[(driver_bit.cell_idx, sink_bit.cell_idx)] = Signal(
-                                                                    src_port=driver_port,
-                                                                    dst_port=sink_port,
-                                                                    wire=wire,
-                                                                    driver_offset=(driver_bit.offset, driver_bit.offset),
-                                                                    sink_offset=(sink_bit.offset, sink_bit.offset)
+                    self.signal_map[(driver_bit, sink_bit)] = Signal(
+                                                                    wire=wire.name,
+                                                                    delay=0.0,
                                                                 )
-                else:
+                '''else:
                     signal = self.signal_map.get((driver_bit.cell_idx, sink_bit.cell_idx))
                     signal.driver_offset = (*signal.driver_offset[:1], driver_bit.offset)
-                    signal.sink_offset = (*signal.sink_offset[:1], sink_bit.offset)
+                    signal.sink_offset = (*signal.sink_offset[:1], sink_bit.offset)'''
 
         '''for key, signal in self.signal_map.items():
             print(f'({self.get_cell(key[0]).name}[{key[0]}], {self.get_cell(key[1]).name}[{key[1]}])', (signal.src_port.name, signal.dst_port.name, signal.driver_offset, signal.sink_offset))

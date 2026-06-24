@@ -86,17 +86,17 @@ class Bit:
     def from_wire(wire:Wire, offset: int, cell_idx:int, port_idx:int):
         return Bit(name=wire.name + '[' + str(offset) + ']', offset=offset, cell_idx=cell_idx, port_idx=port_idx, wire=wire.name)
 
+    def __hash__(self):
+        return hash(astuple(self))
+
     def __repr__(self):
         return f'Bit({asdict(self)})'
 
 
 @dataclass
 class Signal:
-    src_port: Port
-    dst_port: Port
-    wire: Wire
-    driver_offset: tuple[int, int]
-    sink_offset: tuple[int, int]
+    wire: str
+    delay: float
 
     def __eq__(self, other):
         if not isinstance(other, Signal):

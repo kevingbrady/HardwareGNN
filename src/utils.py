@@ -1,45 +1,37 @@
 from pyosys import libyosys as yosys
+import contextlib
+import os
+import sys
 
+@contextlib.contextmanager
+def output_manager(silent=False):
+    # Mutes stdout if silent is True, otherwise output can pass through
+    if not silent:
+        yield
+        return
+    sys.stdout.flush()
 
-def get_module_hierarchy(design):
-    visited = set()
-    ordered_list = []
+    with contextlib.ExitStack() as stack:
+        # 1. Open /dev/null and schedule its closure
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        stack.callback(os.close, devnull)
 
-    def traverse(module):
-        if module is None or module.name.str() in visited:
-            return
+        # 2. Back up the original stdout descriptor (1)
+        old_stdout_fd = os.dup(1)
 
-        visited.add(module.name.str())
-        ordered_list.append(module)
+        # --- CRITICAL LIFO ORDER CORRECTION ---
+        # We want os.close to happen LAST during cleanup, so we register it FIRST.
+        stack.callback(os.close, old_stdout_fd)
+        # We want os.dup2 to happen FIRST during cleanup, so we register it LAST.
+        stack.callback(os.dup2, old_stdout_fd, 1)
 
-        # Recurse through all instantiated sub-modules
-        for cell_id, cell in module.cells_.items():
-            cell_type = cell.type.str()
-            # Ensure the cell is not a standard primitive but a defined module
-            if design.has(cell_type):
-                sub_module = design.module(cell_type)
-                traverse(sub_module)
+        # 3. Force descriptor 1 to redirect to /dev/null
+        os.dup2(devnull, 1)
 
-    # 1. Start traversal at the top module
-    top_mod = design.top_module()
-    if top_mod:
-        traverse(top_mod)
+        yield
 
-    return ordered_list
+        sys.stdout.flush()
+
 
 def compact_dir(obj):
     return set(dir(obj)) - set(dir(object))
-
-
-
-def get_bit_key(sig_bit):
-    """
-    Extracts a unique, hashable C++ tuple from a SigBit object.
-    This bypasses Python instance reference mismatches.
-    """
-    if sig_bit.wire:
-        # returns (wire_name_str, bit_index) e.g., ('\\my_net', 2)
-        return sig_bit.wire.name.c_str().replace('\\', ''), sig_bit.offset
-    else:
-        # Handles constant values (0, 1, x, z) by using their enum data value
-        return "const", sig_bit.data

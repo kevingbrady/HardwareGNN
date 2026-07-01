@@ -5,35 +5,71 @@ read_liberty $liberty_file
 read_verilog $v_file_path
 link_design $top_module
 
+set connections [dict create]
 
-set all_instances [get_cells -hierarchical *]
+foreach net [get_nets -hierarchical] {
 
-foreach inst_obj $all_instances {
+    set net_name [get_property $net full_name]
+    set fan_in 0
+    set fan_out 0
 
-    # Extract the full hierarchical name string of the cell
-    set inst_name [get_property -object_type cell $inst_obj name]
-    set parent_module [get_property -object_type cell $inst_obj ref_name]
+    set pins [get_pins -quiet -of_objects $net]
+    set drivers {}
+    set sinks {}
 
-    # Get all pins belonging to this specific instance object
-    set inst_pins [get_pins -of_objects $inst_obj]
+    foreach pin $pins {
+        set pin_name [get_property $pin full_name]
+        set dir [get_property $pin direction]
 
-    foreach pin_obj $inst_pins {
-        # Grab the simple pin leaf name (e.g., "D", "Q", "A1")
-        set pin_name [file tail [get_property $pin_obj name]]
-
-        # Find the net object tied to this physical pin
-        set connected_net [get_nets -of_objects $pin_obj]
-
-        # Check if the pin is physically hooked up to a wire
-        if {$connected_net != "" && $connected_net != "NULL"} {
-            set hdl_signal_name [get_property $connected_net name]
-        } else {
-            # Mark clearly so your GNN graph builder knows it is a floating/dead-end pin
-            set hdl_signal_name "UNCONNECTED"
+        if {$dir eq "output"} {
+            lappend sinks $pin_name
+            incr fan_in
         }
-
-        # 3. Stream the entry straight to the CSV file
-        puts "$parent_module,$inst_name,$pin_name,$hdl_signal_name"
+        if {$dir eq "input"} {
+            lappend drivers $pin_name
+            incr fan_out
+        }
     }
+
+    foreach driver $drivers {
+        foreach sink $sinks {
+
+            regsub -all {\[\d+\]} $driver "" clean_driver_pin
+            regsub -all {\[\d+\]} $sink "" clean_sink_pin
+
+            regsub -all {\$[a-zA-Z0-9_\.:\\[\d+\]]*} $clean_driver_pin "" clean_driver_pin
+            regsub -all {\$[a-zA-Z0-9_\.:\\[\d+\]]*} $clean_sink_pin "" clean_sink_pin
+
+
+            set key_list [list $clean_driver_pin $clean_sink_pin]
+
+            if {![dict exists $connections $key_list]} {
+
+                set temp_list [list 1 $fan_in $fan_out]
+                dict set connections $key_list $temp_list
+
+            } else {
+                set temp_list [dict get $connections $key_list]
+                set conn_count [lindex $temp_list 0]
+                set temp_list [lreplace $temp_list 0 0 [expr {$conn_count + 1}]]
+                dict set connections $key_list $temp_list
+            }
+        }
+    }
+}
+
+dict for {key data_list} $connections {
+
+    set driver [file dirname [lindex $key 0]]
+    set sink [file dirname [lindex $key 1]]
+
+    set src_port [string map {"/" ""} [file tail [lindex $key 0]]]
+    set dst_port [string map {"/" ""} [file tail [lindex $key 1]]]
+    set width [lindex $data_list 0]
+    set fan_in [lindex $data_list 1]
+    set fan_out [lindex $data_list 2]
+
+    puts "$driver, $src_port, $sink, $dst_port, $fan_in, $fan_out, $width"
+
 }
 

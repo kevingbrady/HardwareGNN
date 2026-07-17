@@ -2,6 +2,8 @@ from dataclasses import dataclass, asdict, astuple, fields, field
 from pyosys.libyosys import PortDir
 from typing import ClassVar, Dict
 
+import re
+
 
 @dataclass
 class FileInfo:
@@ -40,6 +42,7 @@ class Cell:
 
     idx: int
     name: str
+    module: str
     types: dict
     ports: list[Port]
     internal_power: float
@@ -49,12 +52,17 @@ class Cell:
     max_delay: float
     max_slew: float
     area: float
+    fan_in: int = 0
+    fan_out: int = 0
     label: int = 0
 
     def __post_init__(self):
         for key in self.types.keys():
             if key not in self._cell_type_map:
                 self._cell_type_map[key] = len(self._cell_type_map)
+
+    def get_port(self, port_name):
+        return next((port for port in self.ports if port.name == port_name), None)
 
     def get_type_embedding(self):
         pass
@@ -72,13 +80,13 @@ class Cell:
 
 
 @dataclass
-class Wire:
+class Net:
     src: int
     dst: int
-    src_port: int
-    dst_port: int
-    fan_in: int
-    fan_out: int
+    src_port: Port
+    dst_port: Port
+    fan_in: int = 0
+    fan_out: int = 0
     width: int=1
     file_info: FileInfo=field(default_factory=FileInfo)
 
@@ -86,4 +94,4 @@ class Wire:
         return hash(astuple(self))
 
     def __repr__(self):
-        return f'Wire({asdict(self)})'
+        return f'Net({asdict(self)})'

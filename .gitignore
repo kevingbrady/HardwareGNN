@@ -1,6 +1,7 @@
 data/
 .venv/
 uv.lock
-__temp_netlist.v
-output.txt
+.python-version
+scratch.txt
+TrustHubGraphDataset.h5
 sctrach.txt

@@ -109,6 +109,8 @@ foreach inst $all_instances {
     set lib_cell_obj [get_lib_cells -of_objects $inst]
     set cell_area 0.0
 
+    #puts $scratch_file "$instance, $type"
+
     if {$end in $artifacts} {
        set instance [file dirname $instance]
     }
@@ -202,6 +204,7 @@ foreach entry $sorted_totals {
 
     append output_string [join $json_elements ", "] "\}"
     puts $output_string
+    #puts $scratch_file $output_string
 }
 
 #close $scratch_file

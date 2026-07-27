@@ -1,5 +1,5 @@
 from pathlib import Path
-from src.TCLGraphBuilder import TCLGraphBuilder
+from src.TCLGraphBuilder import TCLGraph
 from src.h5Storage import h5Store
 from src.utils import pretty_time_delta
 from src.errors import *
@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import re
 import time
-import numpy as np
+
 
 print_lock = Lock()
 
@@ -33,7 +33,9 @@ class VerilogGraphDataset:
 
         self.dataset = h5Store(len(run_list))
 
-        run_list = [x for x in run_list if run_list.index(x) == 3]
+        #run_list = [x for x in run_list if run_list.index(x) == 38]
+        #run_list = [x for x in run_list if 'PIC16F84-T200' in x]
+
         print(run_list)
         dataset_processing_start = time.time()
 
@@ -49,27 +51,19 @@ class VerilogGraphDataset:
     def design_output_handler(self, input_directory, dataset_idx, future):
 
         try:
-            nodes = 0
-            edges = 0
-
-            circuit_graph, trojan_modules = future.result()
+            circuit_graph = future.result()
 
             if circuit_graph:
                 circuit_graph.builder_end_time = time.time()
-                nodes = len(circuit_graph.netlist)
-                edges = len(circuit_graph.connections)
 
                 with print_lock:
-                    #[print(cell) for cell in circuit_graph.netlist]
                     print(f'[COMPLETED] {input_directory} [{pretty_time_delta(circuit_graph.builder_end_time - circuit_graph.builder_start_time)}]')
-                    print('\t', trojan_modules)
+                    print('\t', circuit_graph.get_trojan_cells())
                     print('\t', 'Nodes: ', len(circuit_graph.netlist), 'Edges: ', len(circuit_graph.connections))
 
             self.dataset.update(
                 dataset_idx,
-                np.array([], dtype=np.uint8),
-                nodes,
-                edges,
+                circuit_graph,
                 input_directory
             )
 
@@ -77,37 +71,64 @@ class VerilogGraphDataset:
             with print_lock:
                 print(f"[ERROR] Directory {input_directory} failed to build circuit graph : {exc}", flush=True)
 
-    def run_single_circuit(self, circuit_dir):
-        for inst in Path(circuit_dir).glob('*'):
+    @staticmethod
+    def run_single_circuit(data_dir):
+        for inst in Path(data_dir).glob('*'):
             if inst.name == 'src':
 
-                clean_circuit_modules = []
                 circuit_files_dir = inst.absolute()
+                troj_text_file_cells = []
+                clean_cells = []
 
                 for circuit_dir in inst.glob('*'):
 
                     if circuit_dir.name == 'TjFree':
+                        # All files and modules are named the same in these directories
+                        # for circuits and their malicious equivalents
+                        # so ignore them for getting clean cell names
+                        if all(sub not in data_dir for sub in ['PIC16F84', 'MC8051', 'RS232']):
+                            clean_circuit = TCLGraph(circuit_dir.absolute())
+                            clean_cells = clean_circuit.get_cells_only()
 
-                        clean_circuit_modules = TCLGraphBuilder(circuit_dir.absolute()).get_modules()
-
-                    elif circuit_dir.name in ('TjIn', '180nm'):
+                    elif circuit_dir.name == 'TjIn':
                         circuit_files_dir = circuit_dir.absolute()
 
-                trojan_circuit = TCLGraphBuilder(circuit_files_dir)
+                    elif circuit_dir.name == '180nm':
+                        circuit_files_dir = circuit_dir.absolute()
+                        with open(f'{circuit_dir.absolute()}/troj_modules.txt', 'r') as file:
+                            troj_text_file_cells = [line.strip() for line in file]
+
+
+                trojan_circuit = TCLGraph(circuit_files_dir)
 
                 if trojan_circuit.input_files:
-                    trojan_modules = [x for x in trojan_circuit.modules if
-                                      clean_circuit_modules != [] and (x != 'top' and x not in clean_circuit_modules)]
+
                     trojan_circuit.low_level_design_pass()
 
-                    return trojan_circuit, trojan_modules
+                    if 'AES-' in data_dir:
+                        if clean_circuit.top_module != trojan_circuit.top_module:
 
-        return None, []
+                            clean_cells = [str(x).replace('aes_128/', 'top/AES/') for x in clean_cells]
+                            clean_cells.append('top/AES')
 
-    def sort_key(self, path):
-        # Extract the value after the last slash
+                    if 'wb_conmax-T200' in data_dir or 'wb_conmax-T300' in data_dir:
+                        clean_cells.remove('wb_conmax_top/rf')
+
+                    for cell in trojan_circuit.netlist:
+                        instance_name = cell.name.rpartition('/')[2]
+                        if instance_name in troj_text_file_cells:
+                            cell.label = 1
+                        elif cell.name not in clean_cells:
+                            cell.label = 1
+
+                    return trojan_circuit
+
+        return None
+
+    @staticmethod
+    def sort_key(path):
+
         filename = path.split('/')[-1]
-
-        # Split the filename into text chunks and numeric chunks
-        # Non-digits are treated as text; digits are converted to integers
         return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', filename)]
+
+

@@ -7,7 +7,7 @@ set artifacts $::env(artifacts)
 link_design $top_module
 
 set connections [dict create]
-set scratch_file [open "scratch.txt" w]
+#set scratch_file [open "scratch.txt" w]
 
 foreach net [get_nets -hierarchical] {
 
@@ -20,8 +20,11 @@ foreach net [get_nets -hierarchical] {
     set sinks {}
 
     foreach pin $pins {
+
         set pin_name [get_property $pin full_name]
         set dir [get_property $pin direction]
+
+        #puts $scratch_file "$pin_name     $dir"
 
         if {$dir eq "output"} {
             lappend sinks $pin_name
@@ -35,7 +38,7 @@ foreach net [get_nets -hierarchical] {
 
     foreach driver $drivers {
         foreach sink $sinks {
-
+            #puts $scratch_file "$driver       $sink"
             set src_port [file tail $driver]
             set dst_port [file tail $sink]
 
@@ -95,8 +98,8 @@ dict for {key data_list} $connections {
 
     set output_string "$driver, $src_port, $sink, $dst_port, $fan_in, $fan_out, $width"
     puts $output_string
-    puts $scratch_file $output_string
+    #puts $scratch_file $output_string
 
 }
 
-close $scratch_file
+#close $scratch_file

@@ -1,8 +1,5 @@
 from pathlib import Path
-from src.utils import compact_dir, output_manager
-from src.verilog_dataclasses import Cell, Port, Net, FileInfo
-from contextlib import redirect_stdout
-from pyosys import libyosys as yosys
+from src.verilog_dataclasses import Cell, Port, Net
 from src.artifacts import artifacts
 from src.errors import YosysSynthesisError, TCLError
 
@@ -14,29 +11,39 @@ import time
 liberty_verilog_file = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v'
 liberty_library_path = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib'
 
-
-class TCLGraphBuilder:
+class TCLGraph:
 
     def __init__(self, verilog_circuit_dir):
-        super(TCLGraphBuilder, self).__init__()
+        super(TCLGraph, self).__init__()
         self.builder_start_time = time.time()
         self.builder_end_time = 0
 
         self.directory = verilog_circuit_dir
         self.silent = True
-        self.show_warnings = False
-        self.modules = []
+        self.top_module = None
 
         self.netlist: list[Cell] = []  # Nodes
         self.connections: list[Net] = []  # Edges
 
         self.input_files = self.get_input_files(verilog_circuit_dir)
-        if len(self.input_files) > 0:
-            self.modules, self.top_module = self.extract_behavioral_design()
 
+    def get_cells_only(self):
 
-    def get_modules(self):
-        return self.modules
+        cells = []
+        env = self.yosys_synthesis_pass()
+
+        cell_data = f'{Path.cwd()}/metadata/get_cells_only.tcl'
+        process = subprocess.Popen(['sta', '-no_splash', '-exit', cell_data], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+        for idx, line in enumerate(process.stdout):
+            cell = line.strip()
+            cells.append(cell)
+
+        os.remove(env['temp_verilog_file'])
+
+        return cells
+
 
     def get_input_files(self, data_dir):
 
@@ -53,49 +60,47 @@ class TCLGraphBuilder:
 
         return input_files
 
-
-    def extract_behavioral_design(self):
-
-        with output_manager(silent=self.silent):
-            yosys.yosys_setup()
-            design = yosys.Design()
-
-            design.run_pass(f'read_verilog {" ".join(self.input_files)}')
-            design.run_pass(f'hierarchy -auto-top')
-
-            top_module = design.top_module().name.str().replace("\\", '')
-            modules = [str(x).replace('\\', '') for x in design.modules_]
-
-        return modules, top_module
-
-    def low_level_design_pass(self):
+    def set_up_tcl_env(self):
 
         custom_env = os.environ.copy()
-        temp_verilog_file = f'{self.directory}/__temp_netlist.v'
 
         custom_env["input_files"] = " ".join(self.input_files)
-        custom_env["top_module"] = self.top_module
         custom_env["artifacts"] = " ".join(artifacts)
         custom_env["liberty_library_file"] = liberty_library_path
         custom_env["liberty_verilog_file"] = liberty_verilog_file
         custom_env["gate_definitions_1"] = f'{Path.cwd()}/metadata/gate_definitions_1.v'
         custom_env["gate_definitions_2"] = f'{Path.cwd()}/metadata/gate_definitions_2.v'
         custom_env["data_dir"] = f'{self.directory}'
-        custom_env["temp_verilog_file"] = temp_verilog_file
+        custom_env["temp_verilog_file"] = f'{self.directory}/__temp_netlist.v'
 
-        self.yosys_synthesis_pass(custom_env)
-        self.power_timing_area_pass(custom_env)
-        self.pin_pin_connection_pass(custom_env)
+        return custom_env
 
-        os.remove(temp_verilog_file)
+    def low_level_design_pass(self):
 
-    def yosys_synthesis_pass(self, env):
+        env = self.yosys_synthesis_pass()
+        self.power_timing_area_pass(env)
+        self.pin_pin_connection_pass(env)
+
+        os.remove(env['temp_verilog_file'])
+
+    def yosys_synthesis_pass(self):
+
+        env = self.set_up_tcl_env()
+
+        if not self.top_module:
+            check_top_module = subprocess.run(['yosys', '-c', f'{Path.cwd()}/metadata/get_top_module.tcl'], env=env, text=True, capture_output=True)
+            for line in check_top_module.stdout.splitlines():
+                if "Automatically selected" in line:
+                    line_break = line.split(' ')
+                    self.top_module = line_break[2]
+
+            env['top_module'] = self.top_module
 
         yosys_synthesis = f'{Path.cwd()}/metadata/yosys_synthesis.tcl'
         process = subprocess.run(["yosys", '-c', yosys_synthesis], env=env, text=True, capture_output=self.silent)
 
-        if process.returncode == 1:
-            raise YosysSynthesisError(process.stderr)
+        if process.returncode != 0: raise YosysSynthesisError(process.stderr)
+        return env
 
     def power_timing_area_pass(self, env):
 
@@ -175,44 +180,14 @@ class TCLGraphBuilder:
                 if not line.startswith('Warning'):
                     raise TCLError(line)
 
+    def get_trojan_cells(self):
+        return [x.name for x in self.netlist if x.label == 1]
+
     def get_cell(self, cell_name):
         return next((cell for cell in self.netlist if cell.name == cell_name), None)
-
 
     def get_net(self, driver, sink, src_port, dst_port):
         for net in self.connections:
             if net.src == driver.idx and net.dst == sink.idx and net.src_port == src_port and net.dst_port == dst_port:
                 return net
         return None
-
-
-
-
-
-    def get_file_info(self, module, attributes_dict):
-        filepath = ''
-        filename = ''
-        line_start = 0
-        line_end = 0
-
-        yosys_cell_src_str = None if not "\\src" in attributes_dict else attributes_dict["\\src"]
-
-        if yosys_cell_src_str:
-            filepath, line_nos = yosys_cell_src_str.decode_string().split(':')
-            filename = Path(filepath).name
-            line_start, line_end = line_nos.split('-')
-
-        file_info = FileInfo(
-            filepath=filepath,
-            filename=filename,
-            module=module.str().replace('\\', ''),
-            lines=(float(line_start), float(line_end))
-        )
-
-        return file_info
-
-
-    def to_pyg(self):
-        graph = Data(
-
-        )

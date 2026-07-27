@@ -48,3 +48,5 @@ def output_manager(silent=False):
 
 def compact_dir(obj):
     return set(dir(obj)) - set(dir(object))
+
+

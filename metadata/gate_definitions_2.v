@@ -16,6 +16,12 @@ module NAND3X1(Q,QN,Y,X,OUT,IN1,IN2,IN3,A,B,C);
     assign QN=Q; assign Y=Q; assign X=Q; assign OUT=Q;
 endmodule
 
+module SDFFSRX1(CK,D,SI,SE,SET,RESET,Q,QN,Y,X,OUT,IN1,IN2,IN3,A,B,C,SN,RN);
+    input CK,D,SI,SE,SET,RESET,IN1,IN2,IN3,A,B,C,SN,RN; output Q,QN,Y,X,OUT;
+    sky130_fd_sc_hd__sdfxtp_1 inst(.CLK(CK),.D(D|(IN1|A)),.SCD(SI),.SCE(SE),.Q(Q));
+    assign QN=~Q; assign Y=Q; assign X=Q; assign OUT=Q;
+endmodule
+
 module INVX1(Q,QN,Y,X,OUT,IN1,IN,A);
     input IN1,IN,A; output Q,QN,Y,X,OUT;
     sky130_fd_sc_hd__inv_1 inst(.A(IN1|IN|A),.Y(Q));
@@ -46,11 +52,12 @@ module AND2X2(Q,Y,X,OUT,IN1,IN2,A,B);
     assign Y=Q; assign X=Q; assign OUT=Q;
 endmodule
 
-module INVX0(Q,QN,Y,X,OUT,IN1,IN,A);
-    input IN1,IN,A; output Q,QN,Y,X,OUT;
-    sky130_fd_sc_hd__inv_1 inst(.A(IN1|IN|A),.Y(Q));
-    assign QN=~Q; assign Y=Q; assign X=Q; assign OUT=Q;
+module INVX0(Q,QN,Y,X,OUT,ZN,IN1,IN,A,INP);
+    input IN1,IN,A,INP; output Q,QN,Y,X,OUT,ZN;
+    sky130_fd_sc_hd__inv_1 inst(.A(IN1|IN|A|INP),.Y(Q));
+    assign QN=~Q; assign Y=Q; assign X=Q; assign OUT=Q; assign ZN=Q;
 endmodule
+
 
 module AND4X1(Q,Y,X,OUT,IN1,IN2,IN3,IN4,A,B,C,D);
     input IN1,IN2,IN3,IN4,A,B,C,D; output Q,Y,X,OUT;
@@ -126,6 +133,11 @@ module XNOR2X1(Q,Y,X,OUT,IN1,IN2,A,B);
     input IN1,IN2,A,B; output Q,Y,X,OUT;
     sky130_fd_sc_hd__xnor2_1 inst(.A(IN1|A),.B(IN2|B),.Y(Q));
     assign Y=Q; assign X=Q; assign OUT=Q;
+endmodule
+
+module NOR2X1 (Y, A, B);
+    input A, B; output Y;
+    sky130_fd_sc_hd__nor2_1 inst (.A(A), .B(B), .Y(Y));
 endmodule
 
 module NOR3X0(Q,QN,Y,X,OUT,IN1,IN2,IN3,A,B,C);

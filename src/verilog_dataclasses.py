@@ -1,19 +1,5 @@
 from dataclasses import dataclass, asdict, astuple, fields, field
-from pyosys.libyosys import PortDir
 from typing import ClassVar, Dict
-
-import re
-
-
-@dataclass
-class FileInfo:
-    filepath: str=''
-    filename: str=''
-    module: str=''
-    lines: tuple[float, float]=(0.0, 0.0)
-
-    def __repr__(self):
-        return f'{asdict(self)}'
 
 @dataclass
 class Port:
@@ -88,7 +74,6 @@ class Net:
     fan_in: int = 0
     fan_out: int = 0
     width: int=1
-    file_info: FileInfo=field(default_factory=FileInfo)
 
     def __hash__(self):
         return hash(astuple(self))

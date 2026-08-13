@@ -1,6 +1,6 @@
 from pathlib import Path
 from multiprocessing import Lock
-from src.TCLGraphBuilder import TCLGraph
+from src.graph_builder.TCLGraphBuilder import TCLGraph
 from typing import Any
 import numpy as np
 import h5py
@@ -21,17 +21,24 @@ class h5Store:
 
     write_lock = Lock()
 
-    def __init__(self, num_entries):
-        self.data = np.empty(num_entries, dtype=self.schema)
+    def __init__(self, filename, num_entries):
 
-        self.filename = f'{Path.cwd()}/TrustHubGraphDataset.h5'
-        with h5py.File(self.filename, 'w') as h5file:
-            dataset = h5file.create_dataset('circuit_graph', (num_entries,), dtype=self.schema)
+        self.data = np.empty(num_entries, dtype=self.schema)
+        self.num_entries = num_entries
+        self.filename = filename
+        self.filepath = f'{Path.cwd()}/processed/{filename}.h5'
+
+        with h5py.File(self.filepath, 'a') as h5file:
+            h5file.require_dataset('circuit_graph', (num_entries,), dtype=self.schema)
+
+    def get(self, idx):
+        data = h5py.File(self.filepath, 'r', swmr=True)
+        return self.deserialize(data['circuit_graph'][idx])
 
     def update(self, idx, graph, data_directory):
 
         with self.write_lock:
-            with h5py.File(self.filename, 'r+') as h5file:
+            with h5py.File(self.filepath, 'r+') as h5file:
                 dataset = h5file['circuit_graph']
                 dataset[idx] = self.serialize(graph, data_directory)
 
@@ -54,7 +61,7 @@ class h5Store:
         return pickle.loads(zlib.decompress(graph)), nodes, edges, data_directory
 
     def print_entries(self):
-        with h5py.File(self.filename, 'r') as h5file:
+        with h5py.File(self.filepath, 'r') as h5file:
             dataset = h5file['circuit_graph']
             for row in dataset:
                 print(row)

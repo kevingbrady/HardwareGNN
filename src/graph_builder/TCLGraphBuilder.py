@@ -1,8 +1,11 @@
 from pathlib import Path
-from src.verilog_dataclasses import Cell, Port, Net
-from src.artifacts import artifacts
-from src.errors import YosysSynthesisError, TCLError
+from src.graph_builder.verilog_dataclasses import Cell, Port, Net
+from src.graph_builder.artifacts import artifacts
+from src.graph_builder.errors import YosysSynthesisError, TCLError
+from torch_geometric.data import Data
+from torch.nn import Sequential, Linear, EmbeddingBag
 
+import torch
 import subprocess
 import json
 import os
@@ -171,9 +174,6 @@ class TCLGraph:
                     width=int(conn_data[6])
                 )
 
-                driver.fan_out += net.fan_out
-                sink.fan_in += net.fan_in
-
                 self.connections.append(net)
 
             except AttributeError as e:
@@ -191,3 +191,72 @@ class TCLGraph:
             if net.src == driver.idx and net.dst == sink.idx and net.src_port == src_port and net.dst_port == dst_port:
                 return net
         return None
+
+    def to_pyg(self):
+
+        node_features = []
+        type_indices = []
+        type_counts = []
+        type_offset = []
+
+        cell_embedding = EmbeddingBag(num_embeddings=len(self.netlist), embedding_dim=16, mode='sum')
+
+        offset = 0
+        labels = []
+
+        for cell in self.netlist:
+
+            node_features.append([
+                cell.internal_power,
+                cell.leakage_power,
+                cell.switching_power,
+                cell.total_power,
+                cell.max_slew,
+                cell.max_delay,
+                cell.area
+            ])
+
+            type_indices.extend(cell.get_type_ids())
+            type_counts.extend(cell.get_type_counts())
+            type_offset.append(offset)
+
+            labels.append(cell.label)
+            offset += len(cell.types)
+
+        cell_type_embeddings = cell_embedding(
+            input=torch.tensor(type_indices, dtype=torch.long),
+            offsets=torch.tensor(type_offset, dtype=torch.long),
+            per_sample_weights=torch.tensor(type_counts, dtype=torch.float32)
+        )
+
+        node_features = torch.tensor(node_features, dtype=torch.float32)
+        x = torch.cat([node_features, cell_type_embeddings], dim=1)
+
+        edge_features = []
+        edge_index = []
+
+        for net in self.connections:
+            edge_index.append(
+                (net.src, net.dst)
+            )
+
+            edge_features.append([
+                net.src_port.get_index(),
+                net.dst_port.get_index(),
+                net.fan_in,
+                net.fan_out,
+                net.width
+            ])
+
+        graph = Data(
+            x=x,
+            edge_index=torch.tensor(edge_index, dtype=torch.long),
+            edge_attr=torch.tensor(edge_features, dtype=torch.float32),
+            y=torch.tensor(labels, dtype=torch.long)
+        )
+
+        return graph
+
+
+
+

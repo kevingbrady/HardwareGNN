@@ -10,6 +10,7 @@ class GraphTable(DatabaseTable):
 
     table_columns = {
         'graph': 'BLOB',
+        'pyg_graph': 'BLOB',
         'nodes': 'INT',
         'edges': 'INT',
         'trojan_cell_count': 'INT',
@@ -26,17 +27,22 @@ class GraphTable(DatabaseTable):
 
     def get_pos_weight(self):
         with self.connect() as conn:
+            pos_weight = 0
             query = f'SELECT SUM(trojan_cell_count), SUM(nodes) FROM {self.table_name}'
             trojan_cells, total_cells = conn.execute_query(query)[0]
-            pos_weight = total_cells / max(trojan_cells, 1)
-            print(trojan_cells, total_cells, pos_weight)
+            if trojan_cells and total_cells:
+                pos_weight = total_cells / max(trojan_cells, 1)
+            #print(trojan_cells, total_cells, pos_weight)
             return pos_weight
 
     @staticmethod
     def serialize(graph: Data, filepath: str) -> dict:
         serialized_graph = zlib.compress(pickle.dumps(graph))
+        serialized_pyg_graph = zlib.compress(pickle.dumps(graph.to_pyg()))
+
         return {
             'graph': serialized_graph,
+            'pyg_graph': serialized_pyg_graph,
             'nodes': len(graph.netlist),
             'edges': len(graph.connections),
             'trojan_cell_count': len(graph.get_trojan_cells()),
@@ -44,6 +50,6 @@ class GraphTable(DatabaseTable):
         }
 
     @staticmethod
-    def deserialize(row: tuple[Any, int, int, int, str]) -> Any:
+    def deserialize(row: tuple[Any, Any, int, int, int, str]) -> Any:
         #print(row[0][0])
-        return pickle.loads(zlib.decompress(row[0][0]))
+        return pickle.loads(zlib.decompress(row[0][1]))

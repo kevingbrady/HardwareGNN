@@ -14,6 +14,7 @@ import time
 liberty_verilog_file = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v'
 liberty_library_path = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib'
 
+
 class TCLGraph:
 
     def __init__(self, verilog_circuit_dir):
@@ -25,7 +26,7 @@ class TCLGraph:
         self.silent = True
         self.top_module = None
 
-        self.netlist: list[Cell] = []  # Nodes
+        self.netlist: dict[str, Cell] = {}  # Nodes
         self.connections: list[Net] = []  # Edges
 
         self.input_files = self.get_input_files(verilog_circuit_dir)
@@ -46,7 +47,6 @@ class TCLGraph:
         os.remove(env['temp_verilog_file'])
 
         return cells
-
 
     def get_input_files(self, data_dir):
 
@@ -91,7 +91,8 @@ class TCLGraph:
         env = self.set_up_tcl_env()
 
         if not self.top_module:
-            check_top_module = subprocess.run(['yosys', '-c', f'{Path.cwd()}/metadata/get_top_module.tcl'], env=env, text=True, capture_output=True)
+            check_top_module = subprocess.run(['yosys', '-c', f'{Path.cwd()}/metadata/get_top_module.tcl'], env=env,
+                                              text=True, capture_output=True)
             for line in check_top_module.stdout.splitlines():
                 if "Automatically selected" in line:
                     line_break = line.split(' ')
@@ -111,14 +112,16 @@ class TCLGraph:
         process = subprocess.Popen(['sta', '-no_splash', '-exit', power_timing_area_data], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
-        for idx, line in enumerate(process.stdout):
+        cell_idx = 0
+
+        for line in process.stdout:
 
             try:
 
                 cell_data = [x.strip() for x in line.split(',', maxsplit=9)]
 
                 cell = Cell(
-                    idx=idx,
+                    idx=cell_idx,          # PyG requires 0 based indexing
                     name=cell_data[0],
                     module=cell_data[8],
                     types=json.loads(cell_data[9]),
@@ -129,12 +132,13 @@ class TCLGraph:
                     max_delay=float(cell_data[5]),
                     max_slew=float(cell_data[6]),
                     area=float(cell_data[7]),
-                    ports=[]
+                    ports={}
                 )
 
-                self.netlist.append(cell)
+                self.netlist[cell.name] = cell
+                cell_idx += 1
 
-            except IndexError as e:
+            except (AttributeError, IndexError) as e:
                 if not line.startswith('Warning'):
                     raise TCLError(line)
 
@@ -151,18 +155,24 @@ class TCLGraph:
                 conn_data = [x.strip() for x in line.split(',')]
 
                 driver = self.get_cell(conn_data[0])
-                src_port = driver.get_port(conn_data[1])
-
                 sink = self.get_cell(conn_data[2])
+
+                if not driver:
+                    driver = self.create_dummy_cell(conn_data[0])
+
+                if not sink:
+                    sink = self.create_dummy_cell(conn_data[2])
+
+                src_port = driver.get_port(conn_data[1])
                 dst_port = sink.get_port(conn_data[3])
 
                 if not src_port:
                     src_port = Port(name=conn_data[1], type='output')
-                    driver.ports.append(src_port)
+                    driver.ports[src_port.name] = src_port
 
                 if not dst_port:
                     dst_port = Port(name=conn_data[3], type='input')
-                    sink.ports.append(dst_port)
+                    sink.ports[dst_port.name] = dst_port
 
                 net = Net(
                     src=driver.idx,
@@ -176,15 +186,37 @@ class TCLGraph:
 
                 self.connections.append(net)
 
-            except AttributeError as e:
+            except (AttributeError, IndexError) as e:
                 if not line.startswith('Warning'):
                     raise TCLError(line)
 
+    def create_dummy_cell(self, cell_name):
+        cell = Cell(
+            idx=len(self.netlist) + 1,
+            name=cell_name,
+            module='',
+            types={},
+            internal_power=0,
+            switching_power=0,
+            leakage_power=0,
+            total_power=0,
+            max_delay=0,
+            max_slew=0,
+            area=0,
+            ports={}
+        )
+
+        self.netlist[cell.name] = cell
+
+        return cell
+
     def get_trojan_cells(self):
-        return [x.name for x in self.netlist if x.label == 1]
+        return [x.name for x in self.netlist.values() if x.label == 1]
+
 
     def get_cell(self, cell_name):
-        return next((cell for cell in self.netlist if cell.name == cell_name), None)
+        return self.netlist.get(cell_name, None)
+
 
     def get_net(self, driver, sink, src_port, dst_port):
         for net in self.connections:
@@ -192,71 +224,73 @@ class TCLGraph:
                 return net
         return None
 
-    def to_pyg(self):
 
+    def to_pyg(self):
         node_features = []
+        labels = []
+        type_lengths = []
         type_indices = []
         type_counts = []
-        type_offset = []
 
-        cell_embedding = EmbeddingBag(num_embeddings=len(self.netlist), embedding_dim=16, mode='sum')
-
-        offset = 0
-        labels = []
-
-        for cell in self.netlist:
-
+        for cell in self.netlist.values():
             node_features.append([
-                cell.internal_power,
-                cell.leakage_power,
-                cell.switching_power,
-                cell.total_power,
-                cell.max_slew,
-                cell.max_delay,
-                cell.area
+                cell.internal_power, cell.leakage_power, cell.switching_power,
+                cell.total_power, cell.max_slew, cell.max_delay, cell.area
             ])
 
-            type_indices.extend(cell.get_type_ids())
-            type_counts.extend(cell.get_type_counts())
-            type_offset.append(offset)
-
             labels.append(cell.label)
-            offset += len(cell.types)
 
-        cell_type_embeddings = cell_embedding(
-            input=torch.tensor(type_indices, dtype=torch.long),
-            offsets=torch.tensor(type_offset, dtype=torch.long),
-            per_sample_weights=torch.tensor(type_counts, dtype=torch.float32)
-        )
+            type_lengths.append(len(cell.get_type_ids()))
+            type_indices.extend(cell.get_type_ids())
+            type_counts.extend(cell.get_type_counts_vector())
 
-        node_features = torch.tensor(node_features, dtype=torch.float32)
-        x = torch.cat([node_features, cell_type_embeddings], dim=1)
+        if len(type_indices) != len(type_counts):
+            raise Exception(f"Length of 'type_indices' is {len(type_indices)} and Length of 'type_counts' is {len(type_counts)} in directory {self.directory}")
 
-        edge_features = []
-        edge_index = []
 
-        for net in self.connections:
-            edge_index.append(
-                (net.src, net.dst)
-            )
+        node_features_tensor = torch.tensor(node_features, dtype=torch.float32)
+        label_tensor = torch.tensor(labels, dtype=torch.long)
 
-            edge_features.append([
+        # ZIP extracts columns instantly instead of looping index by index
+        # This extracts src and dst into two separate lists at C-speed
+        src_nodes, dst_nodes = zip(*[(net.src, net.dst) for net in self.connections])
+        edge_index_tensor = torch.tensor([src_nodes, dst_nodes], dtype=torch.long).contiguous()
+
+        # Vectorized feature generation for edges
+        edge_features = [
+            [
                 net.src_port.get_index(),
                 net.dst_port.get_index(),
                 net.fan_in,
                 net.fan_out,
                 net.width
-            ])
+            ]
+            for net in self.connections
+        ]
+        edge_attr_tensor = torch.tensor(edge_features, dtype=torch.float32)
 
-        graph = Data(
-            x=x,
-            edge_index=torch.tensor(edge_index, dtype=torch.long),
-            edge_attr=torch.tensor(edge_features, dtype=torch.float32),
-            y=torch.tensor(labels, dtype=torch.long)
+        graph =  Data(
+            x=node_features_tensor,
+            edge_index=edge_index_tensor,
+            edge_attr=edge_attr_tensor,
+            y=label_tensor,
+
+            type_indices=torch.tensor(type_indices, dtype=torch.long),
+            type_counts=torch.tensor(type_counts, dtype=torch.float32),
+            type_lengths=torch.tensor(type_lengths, dtype=torch.long)
         )
+        try:
+            graph.validate(raise_on_error=True)
+        except ValueError as e:
+            custom_message = {
+                f"\nGraph Validation Error\n"
+                f"File: {self.directory}\n"
+                f"Graph Nodes: {len(self.netlist)} Graph Edges: {len(self.connections)}\n"
+                f"Graph Edge Index Min ID: {graph.edge_index.min()}\n"
+                f"Graph Edge Index Max ID: {graph.edge_index.max()}\n"
+                f"Error: {e}\n"
+            }
+
+            raise ValueError(custom_message) from e
 
         return graph
-
-
-
-

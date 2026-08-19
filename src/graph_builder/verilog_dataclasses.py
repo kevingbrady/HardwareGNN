@@ -11,11 +11,13 @@ class Port:
     _embedding_table: ClassVar[EmbeddingTable] = EmbeddingTable(table_name='PortEmbeddingTable', db_name='VerilogGNN',
                                           db_path=f'{Path.cwd()}/processed/', clear_table=False)
 
+    _idx = int
     name: str
     type: str
 
     def __post_init__(self):
         self._embedding_table.enter_value(self.name)
+        self._idx = self._embedding_table.get_rowid(self.name)
 
     def __hash__(self):
         # Native tuples are much faster and safer than astuple() here
@@ -26,7 +28,7 @@ class Port:
         return f"Port({{'name': '{self.name}', 'type': '{self.type}'}})"
 
     def get_index(self):
-        return self._embedding_table.get_rowid(self.name)
+        return self._idx
 
     def get_base_name(self) -> tuple[str, float]:
         match = re.search(r'_(\d+)$', self.name)
@@ -37,18 +39,24 @@ class Port:
         else:
             return self.name, -1.0
 
+    @staticmethod
+    def get_total_port_types():
+        return Port._embedding_table.get_table_length()
+
 
 @dataclass
 class Cell:
 
     _embedding_table: ClassVar[EmbeddingTable] = EmbeddingTable(table_name='CellTypeEmbeddingTable', db_name='VerilogGNN',
                                       db_path=f'{Path.cwd()}/processed/', clear_table=False)
+    _type_ids = []
+    _type_counts = []
 
     idx: int
     name: str
     module: str
     types: dict
-    ports: list[Port]
+    ports: dict[str, Port]
     internal_power: float
     switching_power: float
     leakage_power: float
@@ -62,15 +70,22 @@ class Cell:
         for key in self.types.keys():
             self._embedding_table.enter_value(key)
 
+        self._type_ids = self._embedding_table.get_rowids_for_values(list(self.types.keys()))
+        self._type_counts = [x for x in self.types.values()]
+
     def get_port(self, port_name):
-        return next((port for port in self.ports if port.name == port_name), None)
+        return self.ports.get(port_name, None)
 
     def get_type_ids(self):
-        return self._embedding_table.get_rowids_for_values(list(self.types.keys()))
+        return self._type_ids
 
-    def get_type_counts(self):
+    def get_type_counts_vector(self):
         #return [np.log1p(x) for x in self.types.values()]
-        return [x for x in self.types.values()]
+        return self._type_counts
+
+    @staticmethod
+    def get_total_cell_types():
+        return Cell._embedding_table.get_table_length()
 
     def __eq__(self, other):
         if not isinstance(other, Cell):

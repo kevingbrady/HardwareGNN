@@ -1,4 +1,5 @@
 from src.logFormatter import logFormatter
+from pathlib import Path
 import contextlib
 import os
 import sys
@@ -57,6 +58,12 @@ def calculate_metrics(y_hat: torch.Tensor, y: torch.Tensor, threshold: float=0.5
     recall = TP / (TP + FN) if (TP + FN) > 0 else 0
 
     return accuracy, precision, recall
+
+def get_dir_size(path_str):
+    root = Path(path_str)
+    # Sum the size of every item that is a valid file
+    return sum(f.stat().st_size for f in root.rglob('*') if f.is_file())
+
 
 @contextlib.contextmanager
 def output_manager(silent=False):

@@ -14,6 +14,7 @@ class EmbeddingTable(DatabaseTable):
     def enter_value(self, value):
         if not self.value_in_table('name', value):
             self.insert(value)
+            self.remove_duplicates()
 
     def get_rowid(self, value):
         with self.connect() as conn:
@@ -31,6 +32,12 @@ class EmbeddingTable(DatabaseTable):
             results = conn.execute_query(query, tuple(values))
 
             return [row[0] for row in results]
+
+    def get_table_length(self):
+        with self.connect() as conn:
+            query = f"SELECT max(rowid) FROM {self.table_name}"
+            results = conn.execute_query(query)
+            return int(results[0][0]) + 1
 
     def remove_duplicates(self):
         with self.connect() as conn:

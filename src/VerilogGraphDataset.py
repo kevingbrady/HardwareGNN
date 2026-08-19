@@ -2,15 +2,17 @@ import multiprocessing
 from pathlib import Path
 from src.graph_builder.TCLGraphBuilder import TCLGraph
 from src.database.GraphTable import GraphTable
-from src.utils import pretty_time_delta
+from src.utils import pretty_time_delta, get_dir_size
 from src.graph_builder.errors import *
 from torch.utils.data import Dataset
+from torch_geometric.data import Batch
 from multiprocessing import Lock
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import re
 import time
 import os
+import torch
 
 print_lock = Lock()
 
@@ -33,7 +35,8 @@ class VerilogGraphDataset(Dataset):
         run_list = [str(f) for f in Path(data_directory).glob('*') if str(f) not in self.ignore_dirs]
         run_list.sort(key=self.sort_key)
 
-        #run_list = [x for x in run_list if run_list.index(x) == 38]
+        #run_list = [x for x in run_list if run_list.index(x) == 42]
+        #run_list = run_list[-2]
         self.pos_weight = 0
 
         if build_dataset:
@@ -53,9 +56,10 @@ class VerilogGraphDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        graph = self.graph_table.get(idx)
-        return graph.to_pyg()
-
+        graph =  self.graph_table.get(idx+1)
+        if not graph:
+            print(f'{idx} not found in GraphTable ...')
+        return graph
 
     def build_verilog_dataset(self, run_list):
 
@@ -63,8 +67,10 @@ class VerilogGraphDataset(Dataset):
         dataset_processing_start = time.time()
 
         with ProcessPoolExecutor(max_tasks_per_child=1) as pool:
-            for idx, circuit_dir in enumerate(run_list):
-                self.graph_table.insert(data=['', 0, 0, 0, circuit_dir])
+            for file in run_list:
+                self.graph_table.insert(data=['', '', 0, 0, 0, file])
+
+            for idx, circuit_dir in enumerate(sorted(run_list, key=lambda f: get_dir_size(f), reverse=True)):
 
                 future = pool.submit(self.run_single_circuit, circuit_dir)
                 bound_callback = partial(self.design_output_handler, circuit_dir, idx)
@@ -134,8 +140,8 @@ class VerilogGraphDataset(Dataset):
                     if 'wb_conmax-T200' in data_dir or 'wb_conmax-T300' in data_dir:
                         clean_cells.remove('wb_conmax_top/rf')
 
-                    for cell in trojan_circuit.netlist:
-                        instance_name = cell.name.rpartition('/')[2]
+                    for cell_name, cell in trojan_circuit.netlist.items():
+                        instance_name = cell_name.rpartition('/')[2]
                         if instance_name in troj_text_file_cells:
                             cell.label = 1
                         elif cell.name not in clean_cells:

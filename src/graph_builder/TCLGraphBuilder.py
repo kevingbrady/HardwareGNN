@@ -3,8 +3,6 @@ from src.graph_builder.verilog_dataclasses import Cell, Port, Net
 from src.graph_builder.artifacts import artifacts
 from src.graph_builder.errors import YosysSynthesisError, TCLError
 from torch_geometric.data import Data
-from torch.nn import Sequential, Linear, EmbeddingBag
-
 import torch
 import subprocess
 import json
@@ -166,22 +164,39 @@ class TCLGraph:
                 src_port = driver.get_port(conn_data[1])
                 dst_port = sink.get_port(conn_data[3])
 
+                src_is_clk = int(conn_data[4])
+                src_is_invert = int(conn_data[5])
+                dst_is_clk = int(conn_data[6])
+                dst_is_invert = int(conn_data[7])
+
                 if not src_port:
-                    src_port = Port(name=conn_data[1], type='output')
+                    src_port = Port(name=conn_data[1], type='output', is_clk=src_is_clk, is_invert=src_is_invert, cell_types=driver.types)
                     driver.ports[src_port.name] = src_port
 
                 if not dst_port:
-                    dst_port = Port(name=conn_data[3], type='input')
+                    dst_port = Port(name=conn_data[3], type='input', is_clk=dst_is_clk, is_invert=dst_is_invert, cell_types=sink.types)
                     sink.ports[dst_port.name] = dst_port
+
+                fan_in = int(conn_data[8])
+                fan_out = int(conn_data[9])
+                width = int(conn_data[10])
+
+                if src_port.is_sequential and dst_port.is_sequential:
+                    net_type = 2    # Control State Register Pipeline Link
+                elif not src_port.is_sequential and dst_port.is_sequential:
+                    net_type = 1    # Logic Control Feed to State Input
+                else:
+                    net_type = 0    # Standard Combinational Stream
 
                 net = Net(
                     src=driver.idx,
                     dst=sink.idx,
+                    net_type=net_type,
                     src_port=src_port,
                     dst_port=dst_port,
-                    fan_in=int(conn_data[4]),
-                    fan_out=int(conn_data[5]),
-                    width=int(conn_data[6])
+                    fan_in=fan_in,
+                    fan_out=fan_out,
+                    width=width
                 )
 
                 self.connections.append(net)
@@ -259,8 +274,15 @@ class TCLGraph:
         # Vectorized feature generation for edges
         edge_features = [
             [
-                net.src_port.get_index(),
-                net.dst_port.get_index(),
+                net.src_port.class_idx,
+                net.dst_port.class_idx,
+                net.net_type,
+                net.src_port.is_clk,
+                net.src_port.is_invert,
+                net.src_port.is_sequential,
+                net.dst_port.is_clk,
+                net.dst_port.is_invert,
+                net.dst_port.is_sequential,
                 net.fan_in,
                 net.fan_out,
                 net.width

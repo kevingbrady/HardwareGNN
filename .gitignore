@@ -3,4 +3,8 @@ data/
 uv.lock
 .python-version
 scratch.txt
+metadata/cell_types_map.json
+metadata/.python-version
+hardwaregnn.egg-info/
 processed/
+final_model/

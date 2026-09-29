@@ -1,4 +1,3 @@
-import multiprocessing
 from pathlib import Path
 from src.graph_builder.TCLGraphBuilder import TCLGraph
 from src.database.GraphTable import GraphTable
@@ -16,7 +15,7 @@ import torch
 
 print_lock = Lock()
 
-class VerilogGraphDataset(Dataset):
+class TrojanGraphDataset(Dataset):
     ignore_dirs = ['/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/AES-T2200',
                    '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/memctrl-T100',
                    '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/MultPyramid-T100',
@@ -29,37 +28,41 @@ class VerilogGraphDataset(Dataset):
                    '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/BasicRSA-T300',
                    '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/BasicRSA-T400']
 
-    def __init__(self, data_directory, build_dataset=False):
-        super(VerilogGraphDataset, self).__init__()
+    def __init__(self, data_directory, transform=None, build_dataset=False):
+        super(TrojanGraphDataset, self).__init__()
 
+        self.transform = transform
         run_list = [str(f) for f in Path(data_directory).glob('*') if str(f) not in self.ignore_dirs]
         run_list.sort(key=self.sort_key)
 
-        #run_list = [x for x in run_list if run_list.index(x) == 42]
+        #run_list = [x for x in run_list if run_list.index(x) == 3]
         #run_list = run_list[-2]
-        self.pos_weight = 0
 
         if build_dataset:
-            self.graph_table = GraphTable(table_name='GraphTable', db_name='VerilogGNN',
-                                          db_path=f'{Path.cwd()}/processed/')
+            self.trojan_graphs = GraphTable(table_name='TrojanGraphs', db_name='VerilogGNN',
+                                            db_path=f'{Path.cwd()}/processed/')
             self.build_verilog_dataset(run_list)
 
         else:
-            self.graph_table = GraphTable(table_name='GraphTable', db_name='VerilogGNN',
-                                          db_path=f'{Path.cwd()}/processed/', clear_table=False)
+            self.trojan_graphs = GraphTable(table_name='TrojanGraphs', db_name='VerilogGNN',
+                                            db_path=f'{Path.cwd()}/processed/', clear_table=False)
 
-        self.length = self.graph_table.get_table_length()
-        self.pos_weight = self.graph_table.get_pos_weight()
+        self.length = self.trojan_graphs.get_table_length()
 
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
-        graph =  self.graph_table.get(idx+1)
-        if not graph:
-            print(f'{idx} not found in GraphTable ...')
+        graph = self.trojan_graphs.get(idx + 1)
+
+        if self.transform:
+            graph = self.transform(graph)
+
         return graph
+
+    def get_combined_subset(self, indices):
+        return Batch.from_data_list([self[x] for x in indices])
 
     def build_verilog_dataset(self, run_list):
 
@@ -67,18 +70,16 @@ class VerilogGraphDataset(Dataset):
         dataset_processing_start = time.time()
 
         with ProcessPoolExecutor(max_tasks_per_child=1) as pool:
-            for file in run_list:
-                self.graph_table.insert(data=['', '', 0, 0, 0, file])
 
             for idx, circuit_dir in enumerate(sorted(run_list, key=lambda f: get_dir_size(f), reverse=True)):
 
                 future = pool.submit(self.run_single_circuit, circuit_dir)
-                bound_callback = partial(self.design_output_handler, circuit_dir, idx)
+                bound_callback = partial(self.design_output_handler, circuit_dir)
                 future.add_done_callback(bound_callback)
 
-        print(f'Finished processing TrustHub dataset in {pretty_time_delta(time.time() - dataset_processing_start)} ')
+        print(f'Finished processing Trojan dataset in {pretty_time_delta(time.time() - dataset_processing_start)} ')
 
-    def design_output_handler(self, input_directory, dataset_idx, future):
+    def design_output_handler(self, input_directory, future):
         try:
             circuit_graph = future.result()
 
@@ -89,9 +90,8 @@ class VerilogGraphDataset(Dataset):
                     print(
                         f'[COMPLETED] {input_directory} [{pretty_time_delta(circuit_graph.builder_end_time - circuit_graph.builder_start_time)}]')
 
-                self.graph_table.update(
-                    data=GraphTable.serialize(circuit_graph, input_directory),
-                    condition=f'rowid = {dataset_idx+1}'
+                self.trojan_graphs.insert(
+                    data=GraphTable.serialize(circuit_graph, input_directory)
                 )
 
         except (YosysSynthesisError, TCLError) as exc:
@@ -157,4 +157,4 @@ class VerilogGraphDataset(Dataset):
         return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', filename)]
 
     def __repr__(self):
-        return f"VerilogGraphDataset({self.length})"
+        return f"TrojanGraphDataset({self.length})"

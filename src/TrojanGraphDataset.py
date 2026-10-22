@@ -16,24 +16,24 @@ import torch
 print_lock = Lock()
 
 class TrojanGraphDataset(Dataset):
-    ignore_dirs = ['/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/AES-T2200',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/memctrl-T100',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/MultPyramid-T100',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/MultPyramid-T200',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/b19-T300',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/b19-T400',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/b19-T500',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/BasicRSA-T100',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/BasicRSA-T200',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/BasicRSA-T300',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed/BasicRSA-T400']
+    ignore_dirs = ['/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/AES-T2200',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/memctrl-T100',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/MultPyramid-T100',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/MultPyramid-T200',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/b19-T300',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/b19-T400',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/b19-T500',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T100',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T200',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T300',
+                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T400']
 
-    def __init__(self, data_directory, transform=None, build_dataset=False):
+    def __init__(self, data_directory, transform=None, sort=False, build_dataset=False):
         super(TrojanGraphDataset, self).__init__()
 
         self.transform = transform
         run_list = [str(f) for f in Path(data_directory).glob('*') if str(f) not in self.ignore_dirs]
-        run_list.sort(key=self.sort_key)
+        if sort: run_list.sort(key=self.sort_key)
 
         #run_list = [x for x in run_list if run_list.index(x) == 3]
         #run_list = run_list[-2]
@@ -54,15 +54,16 @@ class TrojanGraphDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        graph = self.trojan_graphs.get(idx + 1)
+        pyg_graph = self.trojan_graphs.get(idx + 1, select_index=1)
 
         if self.transform:
-            graph = self.transform(graph)
+            pyg_graph = self.transform(pyg_graph)
 
-        return graph
+        return pyg_graph
 
-    def get_combined_subset(self, indices):
-        return Batch.from_data_list([self[x] for x in indices])
+    def get_full_graph(self, idx):
+        full_graph = self.trojan_graphs.get(idx + 1, select_index=0)
+        return full_graph
 
     def build_verilog_dataset(self, run_list):
 

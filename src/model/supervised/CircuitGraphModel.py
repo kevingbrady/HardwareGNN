@@ -7,7 +7,7 @@ from src.model.supervised.FCOutputLayer import FCOutputLayer
 from src.graph_builder.verilog_dataclasses import Cell
 
 class TrojanGNN(Module):
-    def __init__(self, input_dimension, hidden_dimension, output_dimension, num_conv_layers=3, embedding_dim=16, edge_dim=12, threshold=0.5, device='cpu'):
+    def __init__(self, input_dimension, hidden_dimension, output_dimension, num_conv_layers=4, embedding_dim=8, edge_dim=8, threshold=0.5, device='cpu'):
         super(TrojanGNN, self).__init__()
         self.device = device
         self.threshold = threshold
@@ -68,15 +68,10 @@ class TrojanGNN(Module):
 
         for idx, (conv_layer, conv_norm) in enumerate(zip(self.conv_layers, self.conv_norms)):
 
-            if idx == len(self.conv_layers):
-                edge_index = edge_index.T
-
-            residual = x
             x = conv_layer(x, edge_index, edge_attr=edge_attr)
             x = conv_norm(x, batch.batch)
             x = self.gelu(x)
             x = self.dropout(x)
-            x = x + residual
 
             conv_layer_outputs.append(x)
 
@@ -109,96 +104,19 @@ class TrojanGNN(Module):
         probabilities = torch.sigmoid(y_hat)
         predictions = (probabilities > self.threshold).long()
 
+        # Define an uncompiled inner function to run metrics
+        @torch.compiler.disable
+        def _run_metrics_eager(preds, targets):
+            accuracy = self.accuracy_fn(preds, targets)
+            precision = self.precision_fn(preds, targets)
+            recall = self.recall_fn(preds, targets)
+            return accuracy, precision, recall
+
+        # Step out of the compiler by passing detached variables
         with torch.no_grad():
-            accuracy = self.accuracy_fn(predictions, batch.y)
-            precision = self.precision_fn(predictions, batch.y)
-            recall = self.recall_fn(predictions, batch.y)
+            accuracy, precision, recall = _run_metrics_eager(
+                predictions.detach(),
+                batch.y.detach()
+            )
 
         return loss, accuracy, precision, recall
-
-    def calculate_optimal_threshold(self, validation_dataset, dtype=torch.float32, tolerance = 0.0005, logger=None):
-        """
-        Gathers raw predictions across the complete validation split, maps out
-        the global Precision-Recall curve, and computes the optimal decision threshold.
-        """
-        if logger:
-            logger.info("Gathering full validation split predictions for PR Curve calculation...")
-        else:
-            print("Gathering full validation split predictions for PR Curve calculation...")
-
-        # Setup a clean, single-threaded loader to circumvent worker deadlocks during analysis
-        tune_loader = DataLoader(
-            validation_dataset,
-            batch_sampler=DynamicBatchSampler(validation_dataset, max_num=50000, shuffle=False, mode='node'),
-            num_workers=0,
-            pin_memory=True
-        )
-
-        self.eval()
-        all_probs = []
-        all_targets = []
-
-        with torch.no_grad():
-            for tune_batch in tune_loader:
-                tune_batch = tune_batch.to(self.device, non_blocking=True)
-
-                with torch.amp.autocast(device_type='cuda', dtype=dtype):
-                    logits = self(tune_batch)
-                    if logits.shape[-1] == 1:
-                        logits = logits.squeeze(-1)
-                    probs = torch.sigmoid(logits)
-
-                all_probs.append(probs)
-                all_targets.append(tune_batch.y)
-
-        # Merge isolated batch chunks into contiguous arrays
-        all_probs = torch.cat(all_probs)
-        all_targets = torch.cat(all_targets).long()
-
-        # Compute precision, recall boundaries and float threshold arrays
-        precisions, recalls, thresholds = self.pr_curve_fn(all_probs, all_targets)
-
-        # Pull values to CPU space for standard python float parsing
-        precisions = precisions.cpu()
-        recalls = recalls.cpu()
-        thresholds = thresholds.cpu()
-
-        # Strategy: Find the point maximizing the overall validation F1-Score boundary
-        f1_scores = (2 * (precisions * recalls)) / (precisions + recalls + 1e-8)
-
-        f1_scores_thresh = f1_scores[:-1]
-        max_f1 = torch.max(f1_scores_thresh)
-        plateau_indices = torch.where(f1_scores_thresh >= (max_f1 - tolerance))[0]
-        #best_idx = torch.argmax(f1_scores[:-1])  # Exclude trailing element placeholder
-        #opt_threshold = thresholds[best_idx].item()
-
-        min_thresh = thresholds[plateau_indices[0]]
-        max_thresh = thresholds[plateau_indices[-1]]
-
-        opt_threshold = torch.median(thresholds[plateau_indices])
-
-        # Log out metrics summary safely
-        msg = ( f"--- Threshold Optimization ---\n"
-                f"Max Validation F1: {max_f1:.4f}\n"
-                f"Perfect Separation Plateau: [{min_thresh:.4f} to {max_thresh:.4f}]\n"
-                f"Locked Stable Threshold:   {opt_threshold:.4f}\n"
-        )
-
-        if logger:
-            # Assumes logFormatter format styling strings are imported globally or passed
-            logger.info(msg)
-        else:
-            print(msg)
-
-        # Update the active classification decision boundary threshold vector directly
-        self.threshold = opt_threshold
-        return opt_threshold
-
-
-
-
-
-
-
-
-

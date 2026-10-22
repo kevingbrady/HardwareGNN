@@ -22,8 +22,8 @@ class GraphTable(DatabaseTable):
 
         self.create_table(self.table_name, self.table_columns, clear_table)
 
-    def get(self, idx):
-        return self.deserialize(self.select(condition=f"rowid = {idx}"))
+    def get(self, idx, select_index=None):
+        return self.deserialize(self.select(condition=f"rowid = {idx}"), select_index)
 
     @staticmethod
     def serialize(graph: Data, filepath: str) -> list:
@@ -40,5 +40,12 @@ class GraphTable(DatabaseTable):
         ]
 
     @staticmethod
-    def deserialize(row: tuple[Any, Any, int, int, int, str]) -> Any:
-        return pickle.loads(zlib.decompress(row[0][1]))
+    def deserialize(row: tuple[Any, Any, int, int, int, str], select_index=None) -> tuple:
+       if select_index is not None:
+            if select_index in (0, 1):
+                return pickle.loads(zlib.decompress(row[0][select_index]))
+            else:
+                return row[0][select_index]
+
+       return pickle.loads(zlib.decompress(row[0][0])), pickle.loads(zlib.decompress(row[0][1])), row[0][2], row[0][3], row[0][4], row[0][5]
+

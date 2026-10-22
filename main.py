@@ -8,6 +8,7 @@ from src.utils import pretty_time_delta, setup_logger
 from src.logFormatter import logFormatter
 from torch_geometric.loader import DataLoader, DynamicBatchSampler
 
+import torchmetrics
 import warnings
 import sys
 import time
@@ -15,6 +16,10 @@ import logging
 import gc
 
 warnings.filterwarnings("ignore", category=UserWarning)
+torch._dynamo.config.capture_scalar_outputs = True
+torch._inductor.config.max_autotune = False
+torch._inductor.config.triton.cudagraphs = False
+torch._dynamo.allow_in_graph(torchmetrics.Metric)
 
 if __name__ == '__main__':
 
@@ -25,11 +30,11 @@ if __name__ == '__main__':
     else:
         print('GIL is enabled (not free-threaded)')
 
-    data_dir = '/home/kgb/PycharmProjects/HardwareGNN/data/decompressed'
+    data_dir = '/data/TrustHub'
     setup_logger()
     device = (torch.device('cpu'), torch.device('cuda:0'))[torch.cuda.is_available()]
 
-    dataset = TrojanGraphDataset(data_dir, build_dataset=True)
+    dataset = TrojanGraphDataset(data_dir, build_dataset=False)
 
     logging.info(f'{logFormatter.gold}' + str(dataset))
     logging.info(f'{logFormatter.gold}' + str(device))
@@ -40,17 +45,20 @@ if __name__ == '__main__':
     max_nodes = 50000
 
     model = TrojanGNN(
-        input_dimension=7,
+        input_dimension=21,
+        edge_dim=12,
+        embedding_dim=8,
         hidden_dimension=hidden_dim,
         output_dimension=1,
         threshold=threshold,
         device=device
     )
 
-    model = torch.compile(model, mode='reduce-overhead')
+    #model = torch.compile(model, mode='reduce-overhead')
+    model.get_model_metrics = torch.compile(model.get_model_metrics, mode='default', dynamic=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=torch.tensor(5e-4), weight_decay=1e-4)
-    criterion = FocalLoss(alpha=0.85, gamma=3.0, device=device)
+    criterion = FocalLoss(alpha=0.8, gamma=3.0, device=device)
     scaler = torch.amp.GradScaler(device)
 
     epochs = 100
@@ -66,7 +74,7 @@ if __name__ == '__main__':
         training,
         batch_sampler=DynamicBatchSampler(training, max_num=max_nodes, shuffle=True, mode='node'),
         num_workers=train_workers,
-        prefetch_factor=2,
+        prefetch_factor=4,
         persistent_workers=True,
         pin_memory=True
     )
@@ -100,7 +108,7 @@ if __name__ == '__main__':
 
         for batch_idx, batch in enumerate(train_loader):
 
-            batch.to(device, non_blocking=True)
+            batch = batch.to(device, non_blocking=True)
             batch_start_time = time.time()
             graph_count += batch.num_graphs
             optimizer.zero_grad(set_to_none=True)
@@ -186,7 +194,7 @@ if __name__ == '__main__':
             if best_run == [] or (f1 > best_run[-1]):
                 best_run = [epoch, avg_t_loss, avg_t_accuracy, avg_t_precision, avg_t_recall, f1]
                 os.makedirs('final_model', exist_ok=True)
-                torch.save(model._orig_mod.state_dict(), 'final_model/supervised/trojan_detection_model.pth')
+                torch.save(model.state_dict(), 'final_model/supervised/trojan_detection_model.pth')
 
     del val_cycle
     del train_loader

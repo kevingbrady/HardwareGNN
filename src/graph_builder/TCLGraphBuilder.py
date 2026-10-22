@@ -3,15 +3,21 @@ from src.graph_builder.verilog_dataclasses import Cell, Port, Net
 from src.graph_builder.artifacts import artifacts
 from src.graph_builder.errors import YosysSynthesisError, TCLError
 from torch_geometric.data import Data
+from collections import deque, defaultdict
+
 import torch
 import subprocess
 import json
 import os
 import time
 
-liberty_verilog_file = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v'
-liberty_library_path = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib'
+pdk_base = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/'
 
+tech_lef = f'{pdk_base}/techlef/sky130_fd_sc_hd__nom.tlef'
+cell_lef = f'{pdk_base}/lef/sky130_fd_sc_hd.lef'
+
+liberty_verilog_file = f'{pdk_base}/verilog/sky130_fd_sc_hd.v'
+liberty_library_file = f'{pdk_base}/lib/sky130_fd_sc_hd__tt_025C_1v80.lib'
 
 class TCLGraph:
 
@@ -67,10 +73,13 @@ class TCLGraph:
 
         custom_env["input_files"] = " ".join(self.input_files)
         custom_env["artifacts"] = " ".join(artifacts)
-        custom_env["liberty_library_file"] = liberty_library_path
-        custom_env["liberty_verilog_file"] = liberty_verilog_file
-        custom_env["gate_definitions_1"] = f'{Path.cwd()}/metadata/gate_definitions_1.v'
-        custom_env["gate_definitions_2"] = f'{Path.cwd()}/metadata/gate_definitions_2.v'
+        custom_env["tech_lef"] = tech_lef
+        custom_env['cell_lef'] = cell_lef
+        custom_env['liberty_verilog_file'] = liberty_verilog_file
+        custom_env['liberty_library_file'] = liberty_library_file
+        custom_env['utils_file'] = f'{Path.cwd()}/metadata/tcl/utils.tcl'
+        custom_env["gate_definitions_1"] = f'{Path.cwd()}/metadata/tcl/gate_definitions_1.v'
+        custom_env["gate_definitions_2"] = f'{Path.cwd()}/metadata/tcl/gate_definitions_2.v'
         custom_env["data_dir"] = f'{self.directory}'
         custom_env["temp_verilog_file"] = f'{self.directory}/__temp_netlist.v'
 
@@ -89,7 +98,7 @@ class TCLGraph:
         env = self.set_up_tcl_env()
 
         if not self.top_module:
-            check_top_module = subprocess.run(['yosys', '-c', f'{Path.cwd()}/metadata/get_top_module.tcl'], env=env,
+            check_top_module = subprocess.run(['yosys', '-c', f'{Path.cwd()}/metadata/tcl/get_top_module.tcl'], env=env,
                                               text=True, capture_output=True)
             for line in check_top_module.stdout.splitlines():
                 if "Automatically selected" in line:
@@ -98,7 +107,7 @@ class TCLGraph:
 
             env['top_module'] = self.top_module
 
-        yosys_synthesis = f'{Path.cwd()}/metadata/yosys_synthesis.tcl'
+        yosys_synthesis = f'{Path.cwd()}/metadata/tcl/yosys_synthesis.tcl'
         process = subprocess.run(["yosys", '-c', yosys_synthesis], env=env, text=True, capture_output=self.silent)
 
         if process.returncode != 0: raise YosysSynthesisError(process.stderr)
@@ -106,124 +115,118 @@ class TCLGraph:
 
     def power_timing_area_pass(self, env):
 
-        power_timing_area_data = f'{Path.cwd()}/metadata/get_power_timing_area_cell_data.tcl'
-        process = subprocess.Popen(['sta', '-no_splash', '-exit', power_timing_area_data], env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        power_timing_area_data = f'{Path.cwd()}/metadata/tcl/get_power_timing_area_cell_data.tcl'
+        #power_timing_area_data = f'{Path.cwd()}/metadata/openroad/cell_data_aggregator.tcl'
 
+        process = subprocess.Popen(['openroad', '-no_splash', '-exit', power_timing_area_data], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         cell_idx = 0
 
         for line in process.stdout:
 
             try:
+                
+                cell_data = [x.strip() for x in line.split(',', maxsplit=10)]
 
-                cell_data = [x.strip() for x in line.split(',', maxsplit=9)]
+                power = {
+                    'internal_power': float(cell_data[2]),
+                    'switching_power': float(cell_data[3]),
+                    'leakage_power': float(cell_data[4]),
+                    'total_power': float(cell_data[5])
+                }
+
+                timing = {
+                    'max_delay': float(cell_data[6]),
+                    'max_slew': float(cell_data[7])
+                }
+
+                area = float(cell_data[8])
 
                 cell = Cell(
                     idx=cell_idx,          # PyG requires 0 based indexing
-                    name=cell_data[0],
-                    module=cell_data[8],
-                    types=json.loads(cell_data[9]),
-                    internal_power=float(cell_data[1]),
-                    switching_power=float(cell_data[2]),
-                    leakage_power=float(cell_data[3]),
-                    total_power=float(cell_data[4]),
-                    max_delay=float(cell_data[5]),
-                    max_slew=float(cell_data[6]),
-                    area=float(cell_data[7]),
+                    name=cell_data[1],
+                    module=cell_data[9],
+                    types=json.loads(cell_data[10]),
+                    power=power,
+                    timing=timing,
+                    area=area,
                     ports={}
                 )
 
                 self.netlist[cell.name] = cell
                 cell_idx += 1
 
-            except (AttributeError, IndexError) as e:
-                if not line.startswith('Warning'):
+            except (AttributeError, IndexError, ValueError) as e:
+                if line.lower().__contains__('error'):
                     raise TCLError(line)
 
     def pin_pin_connection_pass(self, env):
 
-        connection_data = f'{Path.cwd()}/metadata/bit_signal_map.tcl'
-        process = subprocess.Popen(['sta', '-no_splash', '-exit', connection_data], env=env,
+        connection_data = f'{Path.cwd()}/metadata/tcl/bit_signal_map.tcl'
+        process = subprocess.Popen(['openroad', '-no_splash', '-exit', connection_data], env=env,
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, bufsize=1)
 
         for line in process.stdout:
 
             try:
-                conn_data = [x.strip() for x in line.split(',')]
+                conn_data = [x.strip() for x in line.split(',', maxsplit=11)]
 
-                driver = self.get_cell(conn_data[0])
-                sink = self.get_cell(conn_data[2])
+                driver = self.get_cell(conn_data[1])
+                sink = self.get_cell(conn_data[3])
 
-                if not driver:
-                    driver = self.create_dummy_cell(conn_data[0])
+                src_port = driver.get_port(conn_data[2])
+                dst_port = sink.get_port(conn_data[4])
 
-                if not sink:
-                    sink = self.create_dummy_cell(conn_data[2])
-
-                src_port = driver.get_port(conn_data[1])
-                dst_port = sink.get_port(conn_data[3])
-
-                src_is_clk = int(conn_data[4])
-                src_is_invert = int(conn_data[5])
-                dst_is_clk = int(conn_data[6])
-                dst_is_invert = int(conn_data[7])
+                src_is_clk = int(conn_data[5])
+                src_is_invert = int(conn_data[6])
+                dst_is_clk = int(conn_data[7])
+                dst_is_invert = int(conn_data[8])
 
                 if not src_port:
-                    src_port = Port(name=conn_data[1], type='output', is_clk=src_is_clk, is_invert=src_is_invert, cell_types=driver.types)
+                    src_port = Port(name=conn_data[2], type='output', is_clk=src_is_clk, is_invert=src_is_invert, parent_cell=driver)
                     driver.ports[src_port.name] = src_port
 
                 if not dst_port:
-                    dst_port = Port(name=conn_data[3], type='input', is_clk=dst_is_clk, is_invert=dst_is_invert, cell_types=sink.types)
+                    dst_port = Port(name=conn_data[4], type='input', is_clk=dst_is_clk, is_invert=dst_is_invert, parent_cell=sink)
                     sink.ports[dst_port.name] = dst_port
 
-                fan_in = int(conn_data[8])
-                fan_out = int(conn_data[9])
-                width = int(conn_data[10])
+                fan_in = int(conn_data[9])
+                fan_out = int(conn_data[10])
+                width = int(conn_data[11])
 
-                if src_port.is_sequential and dst_port.is_sequential:
-                    net_type = 2    # Control State Register Pipeline Link
-                elif not src_port.is_sequential and dst_port.is_sequential:
-                    net_type = 1    # Logic Control Feed to State Input
-                else:
-                    net_type = 0    # Standard Combinational Stream
+                driver.fanout['sum'] += fan_out
+                driver.fanout['max'] = max(driver.fanout['max'], fan_out)
+                driver.width_metrics['out_width_sum'] += width
+                driver.total_sinks += 1
+
+                #if driver.combinational_density > 0.85 and sink.combinational_density > 0.85:
+                #sink.in_degree += 1
+
+                sink.fanin['sum'] += fan_in
+                sink.fanin['max'] = max(sink.fanin['max'], fan_in)
+                sink.width_metrics['in_width_sum'] += width
+                sink.total_drivers += 1
+
+                driver_fanout_to_sink_fanin_ratio = driver.fanout['sum'] / sink.fanin['sum'] if sink.fanin['sum'] > 0 else 0.0
 
                 net = Net(
-                    src=driver.idx,
-                    dst=sink.idx,
-                    net_type=net_type,
+                    driver=(driver.idx, driver.name),
+                    sink=(sink.idx, sink.name),
                     src_port=src_port,
                     dst_port=dst_port,
                     fan_in=fan_in,
                     fan_out=fan_out,
+                    driver_fanout_to_sink_fanin_ratio=driver_fanout_to_sink_fanin_ratio,
                     width=width
                 )
 
                 self.connections.append(net)
 
             except (AttributeError, IndexError) as e:
-                if not line.startswith('Warning'):
+                #print(e)
+                if line.lower().__contains__('error'):
                     raise TCLError(line)
-
-    def create_dummy_cell(self, cell_name):
-        cell = Cell(
-            idx=len(self.netlist) + 1,
-            name=cell_name,
-            module='',
-            types={},
-            internal_power=0,
-            switching_power=0,
-            leakage_power=0,
-            total_power=0,
-            max_delay=0,
-            max_slew=0,
-            area=0,
-            ports={}
-        )
-
-        self.netlist[cell.name] = cell
-
-        return cell
 
     def get_trojan_cells(self):
         return [x.name for x in self.netlist.values() if x.label == 1]
@@ -233,14 +236,58 @@ class TCLGraph:
         return self.netlist.get(cell_name, None)
 
 
-    def get_net(self, driver, sink, src_port, dst_port):
+    def compute_logic_depth(self):
+
+        queue = deque()
+
+        in_degree_map = {cell.name: cell.in_degree for cell in self.netlist.values()}
+        adj_list = defaultdict(list)
+        is_sink_ff_input = False
+
         for net in self.connections:
-            if net.src == driver.idx and net.dst == sink.idx and net.src_port == src_port and net.dst_port == dst_port:
-                return net
-        return None
+            if net.src_port.is_clk or net.dst_port.is_clk:
+                continue
+
+            driver_cell_name = net.driver[1]
+            sink_cell_name = net.sink[1]
+            sink_cell_obj = self.get_cell(sink_cell_name)
+            dst_port_name = net.dst_port.name.lower()
+
+            # A Flip-Flop input (D, RST, SET) is a dead-end timing sink.
+            # Signal cannot propagate through it combinationally.
+            is_control_pin = (dst_port_name in ["d", "rst", "set", "reset"])
+
+            if sink_cell_obj.sequential_density > 0.0 and is_control_pin:
+                is_sink_ff_input = True
+
+            adj_list[driver_cell_name].append((sink_cell_name, is_sink_ff_input))
+
+            if not is_sink_ff_input:
+                in_degree_map[sink_cell_name] += 1
+
+        queue.extend([cell_name for cell_name, degree in in_degree_map.items() if degree == 0])
+
+        while queue:
+            driver_name = queue.popleft()
+            driver_cell = self.netlist[driver_name]
+
+            outgoing_depth = driver_cell.logic_depth + 1
+
+            for (sink_cell_name, is_sequential_sink) in adj_list[driver_name]:
+                sink_cell = self.netlist[sink_cell_name]
+                if outgoing_depth > sink_cell.logic_depth:
+                    sink_cell.logic_depth = outgoing_depth
+                    self.netlist[sink_cell_name] = sink_cell
+
+                if not is_sequential_sink:
+                    if in_degree_map[sink_cell_name] > 0:
+                        in_degree_map[sink_cell_name] -= 1
+                        if in_degree_map[sink_cell_name] == 0:
+                            queue.append(sink_cell_name)
 
 
     def to_pyg(self):
+
         node_features = []
         labels = []
         type_lengths = []
@@ -248,9 +295,33 @@ class TCLGraph:
         type_counts = []
 
         for cell in self.netlist.values():
+
+            fanin = cell.get_fanin_metrics()
+            fanout = cell.get_fanout_metrics()
+            width_metrics = cell.get_width_metrics()
+
             node_features.append([
-                cell.internal_power, cell.leakage_power, cell.switching_power,
-                cell.total_power, cell.max_slew, cell.max_delay, cell.area
+                cell.power['internal_power'],
+                cell.power['leakage_power'],
+                cell.power['switching_power'],
+                cell.power['total_power'],
+                cell.timing['max_slew'],
+                cell.timing['max_delay'],
+                cell.area,
+                cell.total_drivers,
+                cell.total_sinks,
+                cell.combinational_density,
+                cell.sequential_density,
+                cell.is_hybrid,
+                cell.logic_depth,
+                fanin['sum'],
+                fanin['max'],
+                fanin['mean'],
+                fanout['sum'],
+                fanout['max'],
+                fanout['mean'],
+                width_metrics['in_width_mean'],
+                width_metrics['out_width_mean']
             ])
 
             labels.append(cell.label)
@@ -268,35 +339,36 @@ class TCLGraph:
 
         # ZIP extracts columns instantly instead of looping index by index
         # This extracts src and dst into two separate lists at C-speed
-        src_nodes, dst_nodes = zip(*[(net.src, net.dst) for net in self.connections])
+        src_nodes, dst_nodes = zip(*[(net.driver[0], net.sink[0]) for net in self.connections])
         edge_index_tensor = torch.tensor([src_nodes, dst_nodes], dtype=torch.long).contiguous()
 
         # Vectorized feature generation for edges
-        edge_features = [
-            [
+        edge_features = []
+
+        for net in self.connections:
+
+            edge_features.append([
                 net.src_port.class_idx,
                 net.dst_port.class_idx,
-                net.net_type,
                 net.src_port.is_clk,
                 net.src_port.is_invert,
                 net.src_port.is_sequential,
                 net.dst_port.is_clk,
                 net.dst_port.is_invert,
                 net.dst_port.is_sequential,
+                net.driver_fanout_to_sink_fanin_ratio,
                 net.fan_in,
                 net.fan_out,
                 net.width
-            ]
-            for net in self.connections
-        ]
+            ])
+
         edge_attr_tensor = torch.tensor(edge_features, dtype=torch.float32)
 
-        graph =  Data(
+        graph = Data(
             x=node_features_tensor,
             edge_index=edge_index_tensor,
             edge_attr=edge_attr_tensor,
             y=label_tensor,
-
             type_indices=torch.tensor(type_indices, dtype=torch.long),
             type_counts=torch.tensor(type_counts, dtype=torch.float32),
             type_lengths=torch.tensor(type_lengths, dtype=torch.long)

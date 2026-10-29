@@ -1,9 +1,4 @@
 yosys -import
 
-set file_list $::env(input_files)
-
-foreach f $file_list {
-    read_verilog -sv $f
-}
-
+eval read_verilog -sv $::env(input_files)
 hierarchy -check -auto-top

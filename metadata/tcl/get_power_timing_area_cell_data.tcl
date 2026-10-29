@@ -15,10 +15,10 @@ source $::env(utils_file)
 set all_instances [get_cells -hierarchical *]
 
 set data [dict create]
-set power_file "$data_dir/power_file.rpt"
+set cell_depth_cache [compute_netlist_logic_depths $top_module $artifacts]
 set scratch_file [open "scratch.txt" w]
 
-
+#puts $scratch_file $cell_depth_cache
 # ============================================================================
 # PRIMARY I/O INITIALIZATION PASS (Captures ports as Graph Nodes)
 # ============================================================================
@@ -27,9 +27,9 @@ foreach port [concat [all_inputs] [all_outputs]] {
     set port_name [get_name $port]
     set cell_name [get_mapped_cell_name $port_name $top_module $artifacts]
 
-    # Initialize port entries: Area is 0.0, module type is flagged explicitly as "port"
+    # Initialize port entries: Area is 0.0, module type is flagged explicitly as "primary i/o"
     if { ![dict exists $data $cell_name] } {
-        dict set data $cell_name [list 0.0 0.0 0.0 0.0 0.0 0.0 0.0 "primary i/o" [dict create]]
+        dict set data $cell_name [list 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0 "primary i/o" [dict create]]
     }
 }
 
@@ -45,7 +45,7 @@ foreach inst $all_instances {
 
     set cell_name [get_mapped_cell_name $instance $top_module $artifacts]
 
-    #puts $scratch_file "$instance,    $cell_name,     $type"
+    puts $scratch_file "$instance,    $cell_name,     $type"
 
     if { $lib_cell_obj ni {"NULL" "" } } {
         set cell_area [get_property $lib_cell_obj area]
@@ -53,23 +53,24 @@ foreach inst $all_instances {
 
     if { ![dict exists $data $cell_name] } {
         # Layout indices: 0:internal_p, 1:switching_p, 2:leakage_p, 3:total_p, 4:max_slew, 5:max_delay, 6:area, 7:module, 8:cell_type_dict
-        dict set data $cell_name [list 0.0 0.0 0.0 0.0 0.0 0.0 $cell_area $type [dict create]]
+        set max_depth [dict get $cell_depth_cache $cell_name]
+        dict set data $cell_name [list 0.0 0.0 0.0 0.0 0.0 0.0 $cell_area $max_depth $type [dict create]]
     } else {
 
         set temp_list [dict get $data $cell_name]
         set p_total [lindex $temp_list 6]
-        set cell_type_dict     [lindex $temp_list 8]
+        set cell_type_dict     [lindex $temp_list 9]
 
         set p_total [expr {$p_total + double($cell_area)}]
 
         if { [string first "sky130" $type] != -1 } {
             dict incr cell_type_dict $type
         } else {
-            lset temp_list 7 $type
+            lset temp_list 8 $type
         }
 
         lset temp_list 6 $p_total
-        lset temp_list 8 $cell_type_dict
+        lset temp_list 9 $cell_type_dict
         dict set data $cell_name $temp_list
     }
 }
@@ -163,7 +164,7 @@ dict for {cell data_list} $data {
         if { [dict exists $data $instance_name] } {
 
             set temp_list [dict get $data $instance_name]
-            set parent_module_type [lindex $temp_list 7]
+            set parent_module_type [lindex $temp_list 8]
 
              # Ensure we only bubble area into true hierarchical parent structures, not leaf cells
             if {$parent_module_type eq ""} {
@@ -194,10 +195,11 @@ foreach entry $sorted_totals {
     set max_slew [lindex $entry 5]
     set max_delay [lindex $entry 6]
     set area [lindex $entry 7]
-    set module [lindex $entry 8]
-    set cell_type_dict [lindex $entry 9]
+    set logic_depth [lindex $entry 8]
+    set module [lindex $entry 9]
+    set cell_type_dict [lindex $entry 10]
 
-    set output_string "\[CELL\], $cell_name, $internal_power, $switching_power, $leakage_power, $total_power, $max_slew, $max_delay, $area, $module, \{"
+    set output_string "\[CELL\], $cell_name, $internal_power, $switching_power, $leakage_power, $total_power, $max_slew, $max_delay, $area, $logic_depth, $module, \{"
 
     set json_elements {}
     dict for { cell_type count } $cell_type_dict {

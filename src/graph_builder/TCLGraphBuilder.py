@@ -2,21 +2,21 @@ from pathlib import Path
 from src.graph_builder.verilog_dataclasses import Cell, Port, Net
 from src.graph_builder.artifacts import artifacts
 from src.graph_builder.errors import YosysSynthesisError, TCLError
+from metadata.module_translator.ModuleTranslator import ModuleTranslator
 from torch_geometric.data import Data
-from collections import deque, defaultdict
-
 import torch
 import subprocess
 import json
 import os
 import time
 
-pdk_base = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd/'
+pdk_base = '/usr/local/share/pdk/sky130A/libs.ref/sky130_fd_sc_hd'
 
 tech_lef = f'{pdk_base}/techlef/sky130_fd_sc_hd__nom.tlef'
 cell_lef = f'{pdk_base}/lef/sky130_fd_sc_hd.lef'
 
 liberty_verilog_file = f'{pdk_base}/verilog/sky130_fd_sc_hd.v'
+liberty_primitives_file =  f'{pdk_base}/verilog/primitives.v'
 liberty_library_file = f'{pdk_base}/lib/sky130_fd_sc_hd__tt_025C_1v80.lib'
 
 class TCLGraph:
@@ -29,6 +29,8 @@ class TCLGraph:
         self.directory = verilog_circuit_dir
         self.silent = True
         self.top_module = None
+        #self.module_translator = MacroGenerator()
+        self.module_translator = ModuleTranslator()
 
         self.netlist: dict[str, Cell] = {}  # Nodes
         self.connections: list[Net] = []  # Edges
@@ -59,7 +61,7 @@ class TCLGraph:
         for file in Path(data_dir).rglob("*"):
             if file.suffix == '.v':
                 filepath = str(file.absolute())
-                if not filepath.__contains__('test') and not filepath.__contains__('tb'):
+                if not filepath.lower().__contains__('test') and not filepath.lower().__contains__('tb'):
                     if file.name in ('aes_synth.v', '__temp_netlist.v'):
                         continue
 
@@ -70,16 +72,19 @@ class TCLGraph:
     def set_up_tcl_env(self):
 
         custom_env = os.environ.copy()
+        macro_filepath = f'{self.directory}/macro_list.v'
+        #self.module_translator.write_macro_definitions(self.input_files, macro_filepath)
+        self.module_translator.write_macro_definitions(self.input_files, macro_filepath)
 
         custom_env["input_files"] = " ".join(self.input_files)
         custom_env["artifacts"] = " ".join(artifacts)
         custom_env["tech_lef"] = tech_lef
         custom_env['cell_lef'] = cell_lef
         custom_env['liberty_verilog_file'] = liberty_verilog_file
+        custom_env['liberty_primitives_file'] = liberty_primitives_file
         custom_env['liberty_library_file'] = liberty_library_file
         custom_env['utils_file'] = f'{Path.cwd()}/metadata/tcl/utils.tcl'
-        custom_env["gate_definitions_1"] = f'{Path.cwd()}/metadata/tcl/gate_definitions_1.v'
-        custom_env["gate_definitions_2"] = f'{Path.cwd()}/metadata/tcl/gate_definitions_2.v'
+        custom_env['macro_list'] = macro_filepath
         custom_env["data_dir"] = f'{self.directory}'
         custom_env["temp_verilog_file"] = f'{self.directory}/__temp_netlist.v'
 
@@ -91,6 +96,7 @@ class TCLGraph:
         self.power_timing_area_pass(env)
         self.pin_pin_connection_pass(env)
 
+        os.remove(env['macro_list'])
         os.remove(env['temp_verilog_file'])
 
     def yosys_synthesis_pass(self):
@@ -98,17 +104,23 @@ class TCLGraph:
         env = self.set_up_tcl_env()
 
         if not self.top_module:
+
             check_top_module = subprocess.run(['yosys', '-c', f'{Path.cwd()}/metadata/tcl/get_top_module.tcl'], env=env,
                                               text=True, capture_output=True)
+            raw_top = ''
             for line in check_top_module.stdout.splitlines():
-                if "Automatically selected" in line:
+                if "Automatically selected" in line and "as design top module" in line:
+                    # Line format: "Automatically selected $abstract\regfile_tb as design top module."
                     line_break = line.split(' ')
-                    self.top_module = line_break[2]
+                    raw_top = line_break[2]  # This gets "$abstract\regfile_tb"
 
-            env['top_module'] = self.top_module
+                    # Strip out Yosys internal prefixes, backslashes, or punctuation
+                    raw_top = raw_top.replace("$abstract\\", "").replace("\\", "").strip(".")
+                    break
+            env['top_module'] = raw_top
 
         yosys_synthesis = f'{Path.cwd()}/metadata/tcl/yosys_synthesis.tcl'
-        process = subprocess.run(["yosys", '-c', yosys_synthesis], env=env, text=True, capture_output=self.silent)
+        process = subprocess.run(["yosys", '-c', yosys_synthesis], env=env, text=True, capture_output=True)
 
         if process.returncode != 0: raise YosysSynthesisError(process.stderr)
         return env
@@ -116,7 +128,7 @@ class TCLGraph:
     def power_timing_area_pass(self, env):
 
         power_timing_area_data = f'{Path.cwd()}/metadata/tcl/get_power_timing_area_cell_data.tcl'
-        #power_timing_area_data = f'{Path.cwd()}/metadata/openroad/cell_data_aggregator.tcl'
+        #power_timing_area_data = f'{Path.cwd()}/metadata/tcl/cell_data_aggregator.tcl'
 
         process = subprocess.Popen(['openroad', '-no_splash', '-exit', power_timing_area_data], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -126,7 +138,7 @@ class TCLGraph:
 
             try:
                 
-                cell_data = [x.strip() for x in line.split(',', maxsplit=10)]
+                cell_data = [x.strip() for x in line.split(',', maxsplit=11)]
 
                 power = {
                     'internal_power': float(cell_data[2]),
@@ -145,11 +157,12 @@ class TCLGraph:
                 cell = Cell(
                     idx=cell_idx,          # PyG requires 0 based indexing
                     name=cell_data[1],
-                    module=cell_data[9],
-                    types=json.loads(cell_data[10]),
+                    module=cell_data[10],
+                    types=json.loads(cell_data[11]),
                     power=power,
                     timing=timing,
                     area=area,
+                    logic_depth=int(cell_data[9]),
                     ports={}
                 )
 
@@ -234,56 +247,6 @@ class TCLGraph:
 
     def get_cell(self, cell_name):
         return self.netlist.get(cell_name, None)
-
-
-    def compute_logic_depth(self):
-
-        queue = deque()
-
-        in_degree_map = {cell.name: cell.in_degree for cell in self.netlist.values()}
-        adj_list = defaultdict(list)
-        is_sink_ff_input = False
-
-        for net in self.connections:
-            if net.src_port.is_clk or net.dst_port.is_clk:
-                continue
-
-            driver_cell_name = net.driver[1]
-            sink_cell_name = net.sink[1]
-            sink_cell_obj = self.get_cell(sink_cell_name)
-            dst_port_name = net.dst_port.name.lower()
-
-            # A Flip-Flop input (D, RST, SET) is a dead-end timing sink.
-            # Signal cannot propagate through it combinationally.
-            is_control_pin = (dst_port_name in ["d", "rst", "set", "reset"])
-
-            if sink_cell_obj.sequential_density > 0.0 and is_control_pin:
-                is_sink_ff_input = True
-
-            adj_list[driver_cell_name].append((sink_cell_name, is_sink_ff_input))
-
-            if not is_sink_ff_input:
-                in_degree_map[sink_cell_name] += 1
-
-        queue.extend([cell_name for cell_name, degree in in_degree_map.items() if degree == 0])
-
-        while queue:
-            driver_name = queue.popleft()
-            driver_cell = self.netlist[driver_name]
-
-            outgoing_depth = driver_cell.logic_depth + 1
-
-            for (sink_cell_name, is_sequential_sink) in adj_list[driver_name]:
-                sink_cell = self.netlist[sink_cell_name]
-                if outgoing_depth > sink_cell.logic_depth:
-                    sink_cell.logic_depth = outgoing_depth
-                    self.netlist[sink_cell_name] = sink_cell
-
-                if not is_sequential_sink:
-                    if in_degree_map[sink_cell_name] > 0:
-                        in_degree_map[sink_cell_name] -= 1
-                        if in_degree_map[sink_cell_name] == 0:
-                            queue.append(sink_cell_name)
 
 
     def to_pyg(self):

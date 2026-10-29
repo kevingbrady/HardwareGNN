@@ -17,17 +17,16 @@ print_lock = Lock()
 
 
 class CleanGraphDataset(Dataset):
-    ignore_dirs = ['/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/AES-T2200',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/memctrl-T100',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/MultPyramid-T100',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/MultPyramid-T200',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/b19-T300',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/b19-T400',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/b19-T500',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T100',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T200',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T300',
-                   '/home/kgb/PycharmProjects/HardwareGNN/data/TrustHub/BasicRSA-T400']
+    ignore_dirs = ['/home/kgb/VerilogDatasets/TrustHub/memctrl-T100',
+                   '/home/kgb/VerilogDatasets/TrustHub/MultPyramid-T100',
+                   '/home/kgb/VerilogDatasets/TrustHub/MultPyramid-T200',
+                   '/home/kgb/VerilogDatasets/TrustHub/b19-T300',
+                   '/home/kgb/VerilogDatasets/TrustHub/b19-T400',
+                   '/home/kgb/VerilogDatasets/TrustHub/b19-T500',
+                   '/home/kgb/VerilogDatasets/TrustHub/BasicRSA-T100',
+                   '/home/kgb/VerilogDatasets/TrustHub/BasicRSA-T200',
+                   '/home/kgb/VerilogDatasets/TrustHub/BasicRSA-T300',
+                   '/home/kgb/VerilogDatasets/TrustHub/BasicRSA-T400']
 
     def __init__(self, data_directory, transform=None, build_dataset=False):
         super(CleanGraphDataset, self).__init__()
@@ -39,21 +38,22 @@ class CleanGraphDataset(Dataset):
             str(item)
             for data_dir in data_directories
             for item in Path(data_dir).iterdir()
-            if item.is_dir() and item.name not in self.ignore_dirs
+            if str(item) not in self.ignore_dirs and item.is_dir()
         ]
 
-        #run_list = [run_list[132050]]
-        run_list = [x for x in run_list if x.__contains__('AES-T300')]
+        run_list = run_list[0:4000]   #run_list = run_list[131310:]
+        #run_list = [run_list[4000]]
+        #run_list = [x for x in run_list if x.__contains__('AES-T300')]
 
-        # run_list.sort(key=self.sort_key)
+        run_list = sorted(run_list, key=lambda d: self.get_verilog_size(d, recursive=False), reverse=True)
 
         # run_list = [x for x in run_list if run_list.index(x) == 3]
 
         if build_dataset:
             self.clean_graphs = GraphTable(table_name='CleanGraphs', db_name='VerilogGNN',
                                            db_path=f'{Path.cwd()}/processed/')
-            self.run_single_circuit(run_list[0])
-            #self.build_verilog_dataset(run_list)
+            #self.run_single_circuit(run_list[0])
+            self.build_verilog_dataset(run_list)
 
         else:
             self.clean_graphs = GraphTable(table_name='CleanGraphs', db_name='VerilogGNN',
@@ -114,20 +114,24 @@ class CleanGraphDataset(Dataset):
         nested_target = base_dir / "src" / "TjFree"
 
         active_dir = nested_target if nested_target.is_dir() else base_dir
-        print(active_dir.absolute())
+        #print(active_dir.absolute())
         circuit = TCLGraph(active_dir.absolute())
         circuit.low_level_design_pass()
-        circuit.compute_logic_depth()
-        cells = [cell for name, cell in circuit.netlist.items()][:150]
-        print(*cells, sep='\n')
+        #cells = [cell for name, cell in circuit.netlist.items()]
+        #print(*cells, sep='\n')
         return circuit
 
 
     @staticmethod
-    def sort_key(path):
-        filename = path.split('/')[-1]
-        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', filename)]
+    def get_verilog_size(dir_str, recursive=False):
+        """Calculates the total byte size of only Verilog (.v) files in a directory."""
+        path = Path(dir_str)
 
+        # Target only .v files (glob matching is case-insensitive on some OS, but *.v is standard)
+        glob_pattern = "**/*.v" if recursive else "*.v"
+
+        # Sum up the sizes of matching Verilog files
+        return sum(f.stat().st_size for f in path.glob(glob_pattern) if f.is_file())
 
     def __repr__(self):
         return f"CleanGraphDataset({self.length})"
